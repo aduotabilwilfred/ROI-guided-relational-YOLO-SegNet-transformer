@@ -132,6 +132,6 @@ make clean        # remove cache directories and virtual environment
 > [!NOTE]
 > `.dvc/config` points at a Google Drive remote, but it requires a
 > `service_account.json` that is intentionally git-ignored and not shared.
-> `dvc push`/`dvc pull` won't work for collaborators — that's fine, since
+> `dvc push`/`dvc pull` won't work for collaborators, since
 > `dvc repro` never needs a remote; it just reruns pipeline stages locally
-> based on file hashes. Data is reproduced, not pulled.
+> based on file hashes. Data is reproduced.
