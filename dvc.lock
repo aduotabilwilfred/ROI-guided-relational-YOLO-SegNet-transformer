@@ -1,0 +1,83 @@
+schema: '2.0'
+stages:
+  prepare_dataset:
+    cmd: python src/data/prepare_dataset.py --data-dir data/raw/actual_dataset
+      --output-dir data/processed/actual_dataset --target-size 512
+    deps:
+    - path: data/raw/actual_dataset
+      hash: md5
+      md5: b104f56072fa7b946c33130af46da51c.dir
+      size: 905040081
+      nfiles: 1622
+    - path: src/data/prepare_dataset.py
+      hash: md5
+      md5: cb4732233bb8143f4e029e9602b30f7d
+      size: 39056
+      isexec: true
+    outs:
+    - path: data/processed/actual_dataset
+      hash: md5
+      md5: 9324877faa677ebf36b75674bf1c8aa2.dir
+      size: 68348024
+      nfiles: 2428
+  make_folds:
+    cmd: python src/data/make_folds.py --data-dir data/raw/actual_dataset
+      --output outputs/folds/cv_manifest.csv --seed 42
+    deps:
+    - path: data/raw/actual_dataset
+      hash: md5
+      md5: b104f56072fa7b946c33130af46da51c.dir
+      size: 905040081
+      nfiles: 1622
+    - path: src/data/make_folds.py
+      hash: md5
+      md5: 220bc8b84631dcd27b07ab8a97225fe5
+      size: 11239
+      isexec: true
+    - path: src/data/prepare_dataset.py
+      hash: md5
+      md5: cb4732233bb8143f4e029e9602b30f7d
+      size: 39056
+      isexec: true
+    outs:
+    - path: outputs/folds/cv_manifest.csv
+      hash: md5
+      md5: 045abbeca86f6f57bdbb93aee015196f
+      size: 164405
+      isexec: true
+    - path: outputs/folds/cv_manifest.summary.json
+      hash: md5
+      md5: 8100871738ddb7bbe1246dc527089e73
+      size: 766
+      isexec: true
+  fold_calibration:
+    cmd: python src/data/fold_calibration.py --manifest
+      outputs/folds/cv_manifest.csv --output outputs/folds/fold_params.json
+      --target-size 512 --sample-size 40 --agents 25 --iters 60
+    deps:
+    - path: outputs/folds/cv_manifest.csv
+      hash: md5
+      md5: 045abbeca86f6f57bdbb93aee015196f
+      size: 164405
+      isexec: true
+    - path: src/data/fold_calibration.py
+      hash: md5
+      md5: 94a55e13134a8efb11a0464247a29886
+      size: 6085
+      isexec: true
+    - path: src/data/osgdf_preprocessing.py
+      hash: md5
+      md5: 61b7bec1408c2629e99e73043bbd3793
+      size: 37014
+      isexec: true
+    - path: src/data/prepare_dataset.py
+      hash: md5
+      md5: cb4732233bb8143f4e029e9602b30f7d
+      size: 39056
+      isexec: true
+    outs:
+    - path: outputs/folds/fold_params.json
+      hash: md5
+      md5: f8f771e4cf15f58a62d3e0e5aae1ffc2
+      size: 1091
+      isexec: true

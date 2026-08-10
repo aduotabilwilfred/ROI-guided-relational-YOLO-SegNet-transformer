@@ -1,0 +1,13 @@
+# PyTorch & CV Core
+torch>=2.0.0
+torchvision
+ultralytics
+opencv-python
+tqdm
+numpy
+matplotlib
+kagglehub
+
+# Notebook environment
+jupyterlab
+ipykernel

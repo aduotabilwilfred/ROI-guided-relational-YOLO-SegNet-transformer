@@ -1,0 +1,49 @@
+stages:
+  prepare_dataset:
+    cmd: python src/data/prepare_dataset.py --data-dir data/raw/actual_dataset --output-dir data/processed/actual_dataset --target-size 512
+    deps:
+      - data/raw/actual_dataset
+      - src/data/prepare_dataset.py
+    outs:
+      - data/processed/actual_dataset
+
+  make_folds:
+    cmd: python src/data/make_folds.py --data-dir data/raw/actual_dataset --output outputs/folds/cv_manifest.csv --seed 42
+    deps:
+      - data/raw/actual_dataset
+      - src/data/make_folds.py
+      - src/data/prepare_dataset.py
+    outs:
+      - outputs/folds/cv_manifest.csv
+      - outputs/folds/cv_manifest.summary.json
+
+  fold_calibration:
+    cmd: python src/data/fold_calibration.py --manifest outputs/folds/cv_manifest.csv --output outputs/folds/fold_params.json --target-size 512 --sample-size 40 --agents 25 --iters 60
+    deps:
+      - outputs/folds/cv_manifest.csv
+      - src/data/fold_calibration.py
+      - src/data/osgdf_preprocessing.py
+      - src/data/prepare_dataset.py
+    outs:
+      - outputs/folds/fold_params.json
+
+  build_fold_ultralytics:
+    cmd: python src/data/build_fold_ultralytics.py --manifest outputs/folds/cv_manifest.csv --fold-params outputs/folds/fold_params.json --output-dir outputs/ultralytics_folds --target-size 512 --class-names cancer
+    deps:
+      - outputs/folds/cv_manifest.csv
+      - outputs/folds/fold_params.json
+      - data/raw/actual_dataset
+      - src/data/build_fold_ultralytics.py
+      - src/data/osgdf_preprocessing.py
+      - src/data/prepare_dataset.py
+    outs:
+      - outputs/ultralytics_folds
+
+  train_folds:
+    cmd: python src/models/train_model.py --manifest outputs/folds/cv_manifest.csv --folds-root outputs/ultralytics_folds --project runs/segment_cv
+    deps:
+      - outputs/ultralytics_folds
+      - src/models/train_model.py
+      - src/data/make_folds.py
+    outs:
+      - runs/segment_cv

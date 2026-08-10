@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+ml-env/
+.env
+.venv/
+
+# Tooling caches & Editor settings
+.vscode/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Project-specific DVC, training runs, and model files
+/data/
+/outputs/
+/runs/
+/reports/
+*.pt
+service_account.json
