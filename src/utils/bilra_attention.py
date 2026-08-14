@@ -63,7 +63,7 @@ class BiLevelRoutingAttention(nn.Module):
 
         def gather_routed(src: torch.Tensor) -> torch.Tensor:
             """
-            Gather tokens of routed regions for keys and values.
+            Gather the tokens of the routed regions for keys and values.
             src: (B, n_reg, tpr, C)
             routing: (B, n_reg, topk)
             """
