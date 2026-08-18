@@ -29,9 +29,9 @@ class RelationalStage(nn.Module):
     """
     One head stage: optional BiLRA, then the RTrB dual-head block.
 
-    The RTrB consumes f_m and f_w feature maps (already masked). BiLRA, when
-    enabled, refines the fused feature first, giving the efficient routing the
-    soft-mask design leaves room for.
+    BiLRA (when enabled) refines the full feature map first. The RTrB then
+    receives the full feature map together with m_mask and w_mask; it gathers
+    ROI tokens internally, so no explicit masking is needed here.
     """
 
     def __init__(self, cfg: HeadConfig, in_channels: int):

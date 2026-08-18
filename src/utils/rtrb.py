@@ -9,14 +9,15 @@ class RelationalTransformerBlock(nn.Module):
 
     Parameters
 
-    in_channels : channels of the input feature maps f_m and f_w.
-    embed_dim : per-head embedding width; each head outputs embed_dim channels,
-        so the block outputs 2 * embed_dim.
-    num_heads : attention heads; embed_dim must be divisible by it.
+    in_channels : channels of the input feature map.
+    embed_dim   : per-head embedding width; each head outputs embed_dim
+        channels, so the block outputs 2 * embed_dim.
+    num_heads   : attention heads; embed_dim must be divisible by it.
 
-    forward(f_m, f_w) where both are (B, in_channels, H, W); f_w may have a
-    different spatial size than f_m (surrounding region), which cross-attention
-    handles naturally since queries and keys need not share token counts.
+    forward(feat, m_mask, w_mask) where feat is (B, in_channels, H, W),
+    m_mask is the tumour binary mask (B, 1, H, W), and w_mask is the
+    surrounding ring mask (B, 1, H, W). Attention is computed only over
+    the masked ROI tokens of each sample.
     Returns (B, 2 * embed_dim, H, W).
     """
 
@@ -42,9 +43,7 @@ class RelationalTransformerBlock(nn.Module):
 
         # w_k residual embeddings: 1x1 convs, one per attention branch
         # (self/cross). They map the attended embed_dim features to in_channels
-        # so the residual add to f_m is shape-compatible.
-
-        # f_m is shape-compatible
+        # so the residual add to feat is shape-compatible.
         self.w_sa = nn.Conv2d(embed_dim, in_channels, kernel_size=1)
         self.w_ca = nn.Conv2d(embed_dim, in_channels, kernel_size=1)
 
