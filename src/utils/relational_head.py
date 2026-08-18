@@ -7,7 +7,7 @@ from torch import nn
 
 from utils.allmlp_decoder import AllMLPDecoder
 from utils.bilra_attention import BiLevelRoutingAttention
-from utils.roi_partition import apply_mask, build_roi_masks
+from utils.roi_partition import build_roi_masks
 from utils.rtrb import RelationalTransformerBlock
 
 
@@ -54,9 +54,7 @@ class RelationalStage(nn.Module):
     ) -> torch.Tensor:
         if self.use_bilra:
             feat = self.bilra(feat)
-        f_m = apply_mask(feat, m_mask)
-        f_w = apply_mask(feat, w_mask)
-        out = self.rtrb(f_m, f_w)  # (B, 2*embed_dim, H, W)
+        out = self.rtrb(feat, m_mask, w_mask)  # (B, 2*embed_dim, H, W)
         return self.project(out)  # (B, embed_dim, H, W)
 
 
