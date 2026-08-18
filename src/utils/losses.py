@@ -46,7 +46,7 @@ def dice_coefficient(
     if target.dim() == 3:
         target = target.unsqueeze(1)
 
-    pred = torch.sigmoid(logits) > threshold.float()
+    pred = torch.sigmoid(logits) > threshold
     inter = (pred * target).sum()
     union = pred.sum() + target.sum() + eps
 
