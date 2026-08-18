@@ -40,10 +40,11 @@ class RelationalTransformerBlock(nn.Module):
         self.q_sa, self.k_sa, self.v_sa = qkv_conv(), qkv_conv(), qkv_conv()
         self.q_ca, self.k_ca, self.v_ca = qkv_conv(), qkv_conv(), qkv_conv()
 
-        # w_k residual embeddings (Eq. 19): 1x1 convs, one per attention branch
+        # w_k residual embeddings: 1x1 convs, one per attention branch
         # (self/cross). They map the attended embed_dim features to in_channels
         # so the residual add to f_m is shape-compatible.
 
+        # f_m is shape-compatible
         self.w_sa = nn.Conv2d(embed_dim, in_channels, kernel_size=1)
         self.w_ca = nn.Conv2d(embed_dim, in_channels, kernel_size=1)
 
@@ -52,45 +53,88 @@ class RelationalTransformerBlock(nn.Module):
         self.out_sa = nn.Conv2d(in_channels, embed_dim, kernel_size=1)
         self.out_ca = nn.Conv2d(in_channels, embed_dim, kernel_size=1)
 
-    def _to_tokens(self, feat: torch.Tensor) -> torch.Tensor:
+    def _project_qkv(self, feat, conv):
+        # feat (B, C, H, W) -> tokens (B, H*W, embed_dim)
+        x = conv(feat)
+        b, e, h, w = x.shape
+        return x.reshape(b, e, h * w).permute(0, 2, 1)
 
-        # (B, embed, H, W) -> (B, heads, H*W, head_dim)
-        b, _, h, w = feat.shape
-        return feat.view(b, self.num_heads, self.head_dim, h * w).permute(0, 1, 3, 2)
+    def _heads(self, tokens):
+        # (n, embed_dim) -> (heads, n, head_dim)
+        n = tokens.shape[0]
+        return tokens.reshape(n, self.num_heads, self.head_dim).permute(1, 0, 2)
 
-    def _attention(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
-        # q,k,v: (B, heads, N, head_dim). Standard scaled dot-product
-
+    def _attend_tokens(self, q, k, v):
+        # q,k,v (heads, n, head_dim) -> (heads, nq, head_dim)
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         weights = scores.softmax(dim=-1)
         return torch.matmul(weights, v)
 
-    def _merge(self, attended: torch.Tensor, h: int, w: int) -> torch.Tensor:
-        # (B, heads, N, head_dim) -> (B, embed, H, W)
-        b = attended.shape[0]
-        x = attended.permute(0, 1, 3, 2).reshape(b, self.embed_dim, h, w)
-        return x
+    def forward(
+        self, feat: torch.Tensor, m_mask: torch.Tensor, w_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """ROI-restricted dual-head attention.
 
-    def forward(self, f_m: torch.Tensor, f_w: torch.Tensor) -> torch.Tensor:
-        _b, _, h, w = f_m.shape
+        feat   : (B, C, H, W) full feature map.
+        m_mask : (B, 1, H, W) binary, tumour region (f_m tokens).
+        w_mask : (B, 1, H, W) binary, surrounding ring (f_w tokens).
 
-        # Self-attention head over f_m
-        q_s = self._to_tokens(self.q_sa(f_m))
-        k_s = self._to_tokens(self.k_sa(f_m))
-        v_s = self._to_tokens(self.v_sa(f_m))
-        g_sa = self._merge(self._attention(q_s, k_s, v_s), h, w)
+        Attention runs only over the ROI tokens of each sample, so cost scales
+        with tumour size, not image size (the paper's efficiency point). The
+        block output is 2*embed_dim channels (Eq. 20). Samples with no ROI
+        return zeros for their attended features and fall back to the residual.
+        """
+        b, _, h, w = feat.shape
+        n = h * w
+        dev = feat.device
 
-        # Cross-attention head: f_m queries, f_w keys/values
-        q_c = self._to_tokens(self.q_ca(f_m))
-        k_c = self._to_tokens(self.k_ca(f_w))
-        v_c = self._to_tokens(self.v_ca(f_w))
-        g_ca = self._merge(self._attention(q_c, k_c, v_c), h, w)
+        # Project once over the whole map; gather per-sample below.
+        q_sa = self._project_qkv(feat, self.q_sa)  # (B, N, embed)
+        k_sa = self._project_qkv(feat, self.k_sa)
+        v_sa = self._project_qkv(feat, self.v_sa)
+        q_ca = self._project_qkv(feat, self.q_ca)
+        k_ca = self._project_qkv(feat, self.k_ca)
+        v_ca = self._project_qkv(feat, self.v_ca)
 
-        # residual learning: w_k is 1x1 conv, residual add to f_m
-        f_sa = self.w_sa(g_sa) + f_m
-        f_ca = self.w_ca(g_ca) + f_m
+        m_flat = m_mask.reshape(b, n) > 0.5
+        w_flat = w_mask.reshape(b, n) > 0.5
 
+        g_sa = torch.zeros(b, n, self.embed_dim, dtype=feat.dtype, device=dev)
+        g_ca = torch.zeros(b, n, self.embed_dim, dtype=feat.dtype, device=dev)
+
+        for i in range(b):
+            m_idx = m_flat[i].nonzero(as_tuple=True)[0]  # tumour tokens
+            if m_idx.numel() == 0:
+                continue  # background: skip
+            w_idx = w_flat[i].nonzero(as_tuple=True)[0]  # ring tokens
+
+            # Self-attention over tumour tokens only.
+            qs = self._heads(q_sa[i, m_idx])
+            ks = self._heads(k_sa[i, m_idx])
+            vs = self._heads(v_sa[i, m_idx])
+            att_sa = self._attend_tokens(qs, ks, vs)  # (heads, m, hd)
+            g_sa[i, m_idx] = att_sa.permute(1, 0, 2).reshape(-1, self.embed_dim)
+
+            # Cross-attention: tumour queries, ring keys/values. If no ring
+            # tokens, cross-attention has nothing to attend to; leave zeros.
+            if w_idx.numel() > 0:
+                qc = self._heads(q_ca[i, m_idx])
+                kc = self._heads(k_ca[i, w_idx])
+                vc = self._heads(v_ca[i, w_idx])
+                att_ca = self._attend_tokens(qc, kc, vc)  # (heads, m, hd)
+                g_ca[i, m_idx] = att_ca.permute(1, 0, 2).reshape(-1, self.embed_dim)
+
+        # Scatter attended tokens back to spatial maps.
+        def to_map(tokens):
+            return tokens.permute(0, 2, 1).reshape(b, self.embed_dim, h, w)
+
+        g_sa_map = to_map(g_sa)
+        g_ca_map = to_map(g_ca)
+
+        # Residual learning: w_k is a 1x1 conv, residual add to feat.
+        f_sa = self.w_sa(g_sa_map) + feat
+        f_ca = self.w_ca(g_ca_map) + feat
+
+        # Project each head to embed_dim and concatenate over channels
         out = torch.cat([self.out_sa(f_sa), self.out_ca(f_ca)], dim=1)
         return out
