@@ -63,7 +63,7 @@ def build_roi_masks(
     """Build f_m and f_w masks for a batch.
 
     Parameters
-    ----------
+
     boxes_per_image : list of length B; each entry (N_i, 4) normalised xyxy
         boxes for that image (N_i may be 0).
     feat_h, feat_w : feature-map resolution the masks are built at.
