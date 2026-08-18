@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 
-class EfficientSelffAtteniton(nn.Module):
+class EfficientSelfAttention(nn.Module):
     """
     Reduces the number of key/value token by a factor r before attention
 
