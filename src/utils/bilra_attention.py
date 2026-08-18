@@ -34,6 +34,10 @@ class BiLevelRoutingAttention(nn.Module):
         self.v = nn.Linear(dim, dim)
         self.proj = nn.Linear(dim, dim)
 
+        self.lce = nn.Conv2d(
+            in_channels=dim, out_channels=dim, kernel_size=3, padding=1, groups=dim
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
         s = self.n_regions
@@ -101,4 +105,8 @@ class BiLevelRoutingAttention(nn.Module):
         out = out.permute(0, 1, 3, 2, 4).reshape(b, n_reg, tokens_per_reg, c)
         out = self.proj(out)
         out = out.view(b, s, s, rh, rw, c).permute(0, 5, 1, 3, 2, 4)
-        return out.reshape(b, c, h, w)
+
+        v_spatial = (
+            v.view(b, s, s, rh, rw, c).permute(0, 5, 1, 3, 2, 4).reshape(b, c, h, w)
+        )
+        return out + self.lce(v_spatial)
