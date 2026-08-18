@@ -20,7 +20,7 @@ class BiLevelRoutingAttention(nn.Module):
     ):
         super().__init__()
         if dim % num_heads != 0:
-            raise ValueError(f"dimension {dim} not divible by num_heads {num_heads}")
+            raise ValueError(f"dimension {dim} not divisible by num_heads {num_heads}")
 
         self.dim = dim
         self.num_heads = num_heads
