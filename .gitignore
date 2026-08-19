@@ -22,5 +22,7 @@ Thumbs.db
 /outputs/
 /runs/
 /reports/
+docs/pipeline_files.md
+docs/bone_tumor_detection_roadmap.md
 *.pt
 service_account.json

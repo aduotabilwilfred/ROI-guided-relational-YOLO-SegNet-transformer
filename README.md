@@ -35,8 +35,30 @@ ROI-guided relational YOLO-SegNet transformer for lightweight bone tumor segment
 └── src
     ├── __init__.py
     ├── data
+    │   ├── __init__.py
+    │   ├── build_fold_ultralytics.py
+    │   ├── fold_calibration.py
+    │   ├── make_folds.py
+    │   ├── osgdf_preprocessing.py
+    │   ├── prepare_dataset.py
+    │   └── run_osgdf.py
     ├── features
+    │   └── __init__.py
     ├── models
+    │   ├── __init__.py
+    │   ├── fheo.py
+    │   ├── train.py
+    │   └── train_handoff.py
+    └── utils
+        ├── __init__.py
+        ├── allmlp_decoder.py
+        ├── bilra_attention.py
+        ├── efficient_attention.py
+        ├── losses.py
+        ├── osgdf_diagnostic.py
+        ├── relational_head.py
+        ├── roi_partition.py
+        └── rtrb.py
 ```
 
 ## Getting Started
