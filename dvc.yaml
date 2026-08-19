@@ -39,11 +39,20 @@ stages:
     outs:
       - outputs/ultralytics_folds
 
-  train_folds:
-    cmd: python src/models/train_model.py --manifest outputs/folds/cv_manifest.csv --folds-root outputs/ultralytics_folds --project runs/segment_cv
+  train:
+    cmd: python src/models/train.py --manifest outputs/folds/cv_manifest.csv --folds-root outputs/ultralytics_folds --project runs/segment_cv
     deps:
       - outputs/ultralytics_folds
-      - src/models/train_model.py
+      - src/models/train.py
       - src/data/make_folds.py
+      - src/models/train_handoff.py
+      - src/models/fheo.py
+      - src/utils/losses.py
+      - src/utils/allmlp_decoder.py
+      - src/utils/bilra_attention.py
+      - src/utils/efficient_attention.py
+      - src/utils/relational_head.py
+      - src/utils/roi_partition.py
+      - src/utils/rtrb.py
     outs:
       - runs/segment_cv
