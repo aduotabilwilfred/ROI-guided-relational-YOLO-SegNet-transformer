@@ -184,7 +184,7 @@ def tune_relational_head(
     """
     from dataclasses import replace
 
-    from train_relational_head import accumulate_fold_dice, train_one_fold
+    from train import accumulate_fold_dice, train_one_fold
 
     space = space or default_search_space()
 

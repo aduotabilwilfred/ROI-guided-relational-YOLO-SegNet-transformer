@@ -14,16 +14,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from models.train_handoff import FrozenYOLOFeatures
 from utils.losses import bce_dice_loss
-from utils.relational_head import HeadConfig, build_head
+from utils.relational_head import HeadConfig, buildHead
 
 
 class MLflowRun:
     def __init__(
-        self, enabled: bool, experiments: str, run_name: str, tracking_uri: str = ""
+        self, enabled: bool, experiment_name: str, run_name: str, tracking_uri: str = ""
     ):
         self.enabled = enabled
         self.mlflow = None
-        self.experiments = experiments
+        self.experiments = experiment_name
         self.run_name = run_name
 
         if not enabled:
@@ -33,7 +33,7 @@ class MLflowRun:
 
             self.mlflow = mlflow
 
-            uri = tracking_uri or "sqlite://mlflow.db"
+            uri = tracking_uri or "sqlite:///mlflow.db"
             mlflow.set_tracking_uri(uri)
             mlflow.set_experiment(self.experiments)
             mlflow.start_run(run_name=self.run_name)
@@ -137,7 +137,7 @@ def train_one_fold(
 ) -> torch.nn.Module:
     detector = FrozenYOLOFeatures(str(weights), imgsz=cfg.image_size)
     detector.model.to(device)
-    head = build_head(cfg).to(device)
+    head = buildHead(cfg).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=lr)
 
     train_ds = FoldImageDataset(fold_dir, "train", cfg.image_size)
@@ -173,8 +173,13 @@ def train_one_fold(
                 train_inter += int((pred * targets).sum().item())
                 train_pred += int(pred.sum().item())
                 train_gt += int(targets.sum().item())
-                train_correct += int((pred == targets).sum().item())
-                train_total += targets.numel()
+
+                pred_per_img = pred.flatten(1).sum(dim=1)
+                gt_per_img = targets.flatten(1).sum(dim=1)
+                train_correct += int(
+                    ((pred_per_img > 20) == (gt_per_img > 0)).sum().item()
+                )
+                train_total += images.shape[0]
 
         epoch_loss = running / len(loader)
         eps = 1e-7
@@ -194,7 +199,13 @@ def train_one_fold(
 
 @torch.no_grad()
 def accumulate_fold_dice(
-    head, detector, fold_dir: Path, cfg: HeadConfig, device: str, batch_size: int
+    head,
+    detector,
+    fold_dir: Path,
+    cfg: HeadConfig,
+    device: str,
+    batch_size: int,
+    presence_min_pixels: int = 20,
 ) -> tuple[int, int, int, float, int, int]:
     """
     Return (intersection, pred_area, gt_area, test_loss, correct, total) over a fold's test images
@@ -222,8 +233,13 @@ def accumulate_fold_dice(
         inter += int((pred * targets).sum().item())
         pred_area += int(pred.sum().item())
         gt_area += int(targets.sum().item())
-        correct += int((pred == targets).sum().item())
-        total += targets.numel()
+
+        pred_area_per_image = pred.flatten(1).sum(dim=1)
+        gt_area_per_image = targets.flatten(1).sum(dim=1)
+        pred_has_tumour = pred_area_per_image > presence_min_pixels
+        actual_has_tumour = gt_area_per_image > 0
+        correct += int((pred_has_tumour == actual_has_tumour).sum().item())
+        total += targets.shape[0]
 
     return inter, pred_area, gt_area, running_loss / len(loader), correct, total
 
@@ -296,6 +312,7 @@ def main() -> int:
 
     total_inter = total_pred = total_gt = 0
     total_correct = total_pixels = 0
+    eps = 1e-7
     per_fold = {}
 
     for fold in range(args.n_folds):
@@ -329,7 +346,7 @@ def main() -> int:
             device=args.device,
             batch_size=args.batch_size,
         )
-        eps = 1e-7
+
         fold_dice = (2 * inter + eps) / (pred + gt + eps)
         test_acc = test_correct / test_total if test_total > 0 else 0.0
         per_fold[fold] = {
@@ -354,7 +371,7 @@ def main() -> int:
         total_correct += test_correct
         total_pixels += test_total
 
-    pooled = (2 * total_inter + 1e-7) / (total_pred + total_gt + eps)
+    pooled = (2 * total_inter + eps) / (total_pred + total_gt + eps)
     pooled_acc = total_correct / total_pixels if total_pixels > 0 else 0.0
     report = {"pooled_dice": pooled, "pooled_acc": pooled_acc, "per_fold": per_fold}
     (args.output / "pooled_metrics.json").write_text(json.dumps(report, indent=2))
