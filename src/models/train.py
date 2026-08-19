@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Dict, List, Path, Tuple
 
@@ -146,6 +148,7 @@ def train_one_fold(
     head.train()
     for epoch in range(epochs):
         running = 0.0
+        train_inter = train_pred = train_gt = 0
         for batch in loader:
             images = batch["image"].to(device)
             targets = batch["mask"].unsqueeze(1).to(device)
@@ -164,23 +167,32 @@ def train_one_fold(
             opt.step()
             running += loss.item()
 
+            with torch.no_grad():
+                pred = (logits > 0).float()
+                train_inter += int((pred * targets).sum().item())
+                train_pred += int(pred.sum().item())
+                train_gt += int(targets.sum().item())
+
         epoch_loss = running / len(loader)
+        eps = 1e-7
+        train_dice = (2 * train_inter + eps) / (train_pred + train_gt + eps)
         print(
-            f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | loss {epoch_loss:.4f} "
+            f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | loss {epoch_loss:.4f} | dice {train_dice:.4f} "
         )
 
         if mlrun is not None:
             #  global step across folds keeps curves distinct per fold
             mlrun.log_metric(f"fold_{fold_idx}_train_loss", epoch_loss, step=epoch)
+            mlrun.log_metric(f"fold_{fold_idx}_train_dice", train_dice, step=epoch)
     return head, detector
 
 
 @torch.no_grad()
 def accumulate_fold_dice(
     head, detector, fold_dir: Path, cfg: HeadConfig, device: str, batch_size: int
-) -> Tuple[int, int, int]:
+) -> Tuple[int, int, int, float]:
     """
-    Return (intersection, pred_area, gt_area) over a fold's test images
+    Return (intersection, pred_area, gt_area, test_loss) over a fold's test images
     """
 
     head.eval()
@@ -188,6 +200,7 @@ def accumulate_fold_dice(
     loader = DataLoader(ds, batch_size=batch_size, collate_fn=collate, shuffle=False)
 
     inter = pred_area = gt_area = 0
+    running_loss = 0.0
 
     for batch in loader:
         images = batch["image"].to(device)
@@ -196,10 +209,146 @@ def accumulate_fold_dice(
         feats = detector.extract_features(images)
         boxes = detector.detect_boxes(batch["path"])
         logits = head(feats, boxes)
+        loss = bce_dice_loss(logits, targets)
+        running_loss += loss.item()
         pred = (logits.sigmoid() > 0.5).float()
 
         inter += int((pred * targets).sum().item())
         pred_area += int(pred.sum().item())
         gt_area += int(targets.sum().item())
 
-    return inter, pred_area, gt_area
+    return inter, pred_area, gt_area, running_loss / len(loader)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Training the relational head across folds, frozen two-stage."
+    )
+
+    parser.add_argument(
+        "--folds-root", type=Path, default=Path("outputs/ultralytics_folds")
+    )
+    parser.add_argument(
+        "--detector-project",
+        type=Path,
+        default=Path("runs/segment_cv"),
+        help="where train_folds.py wrote each fold's weights",
+    )
+    parser.add_argument("--output", type=Path, default=Path("runs/relational_head"))
+    parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    parser.add_argument("--image-size", type=int, default=512)
+    parser.add_argument(
+        "--no-mlflow", action="store_true", help="disable MLflow logging"
+    )
+    parser.add_argument(
+        "--mlflow-experiment", default="relational_head", help="MLflow experiment name"
+    )
+    parser.add_argument(
+        "--mlflow-run-name", default="two_stage_cv", help="MLflow run name"
+    )
+    parser.add_argument(
+        "--mlflow-uri",
+        default="",
+        help="MLflow tracking URI; empty uses local ./mlruns",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    cfg = HeadConfig(image_size=args.image_size)
+    args.output.mkdir(parents=True, exist_ok=True)
+
+    mlrun = MLflowRun(
+        enabled=not args.no_mlflow,
+        experiment_name=args.mlflow_experiment,
+        run_name=args.mlflow_run_name,
+        tracking_uri=args.mlflow_uri,
+    )
+    mlrun.log_params(
+        {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "image_size": args.image_size,
+            "n_folds": args.n_folds,
+            "embed_dim": cfg.embed_dim,
+            "num_heads": cfg.num_heads,
+            "reduction": cfg.reduction,
+            "dilation": cfg.dilation,
+            "use_bilra_in_head": cfg.use_bilra_in_head,
+        }
+    )
+
+    total_inter = total_pred = total_gt = 0
+    per_fold = {}
+
+    for fold in range(args.n_folds):
+        fold_dir = args.folds_root / f"fold_{fold}"
+        weights = args.detector_project / f"fold_{fold}/weights/best.pt"
+        if not weights.exists():
+            raise SystemExit(
+                f"detector weights not found: {weights}\ntrain the YOLOv8 detector (train.py) first"
+            )
+
+        print(f"=== training relational head, fold {fold} ==")
+        head, detector = train_one_fold(
+            fold_dir=fold_dir,
+            weights=weights,
+            cfg=cfg,
+            device=args.device,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            mlrun=mlrun,
+            fold_idx=fold,
+        )
+
+        torch.save(head.state_dict(), args.output / f"head_fold{fold}.pth")
+
+        inter, pred, gt, test_loss = accumulate_fold_dice(
+            head=head,
+            detector=detector,
+            fold_dir=fold_dir,
+            cfg=cfg,
+            device=args.device,
+            batch_size=args.batch_size,
+        )
+        eps = 1e-7
+        fold_dice = (2 * inter + eps) / (pred + gt + eps)
+        per_fold[fold] = {
+            "dice": fold_dice,
+            "intersection": inter,
+            "pred_area": pred,
+            "gt_area": gt,
+            "test_loss": test_loss,
+        }
+        print(f" fold {fold} test loss {test_loss:.4f} | dice {fold_dice:.4f}")
+
+        if mlrun is not None:
+            mlrun.log_metric(f"fold_{fold}_test_loss", test_loss, step=args.epochs)
+            mlrun.log_metric(f"fold_{fold}_test_dice", fold_dice, step=args.epochs)
+
+        total_inter += inter
+        total_pred += pred
+        total_gt += gt
+
+    pooled = (2 * total_inter + 1e-7) / (total_pred + total_gt + eps)
+    report = {"pooled_dice": pooled, "per_fold": per_fold}
+    (args.output / "pooled_metrics.json").write_text(json.dumps(report, indent=2))
+    mlrun.log_metric("pooled_dice", pooled)
+    mlrun.end()
+
+    print(f"\npooled Dice over all test folds: {pooled:.4f}")
+    print(f"metrics written to {args.output / 'pooled_metrics.json'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
