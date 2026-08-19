@@ -40,7 +40,7 @@ stages:
       - outputs/ultralytics_folds
 
   train:
-    cmd: python src/models/train.py --manifest outputs/folds/cv_manifest.csv --folds-root outputs/ultralytics_folds --project runs/segment_cv
+    cmd: python src/models/train.py --folds-root outputs/ultralytics_folds --detector-project runs/segment_cv --output runs/relational_head
     deps:
       - outputs/ultralytics_folds
       - src/models/train.py
