@@ -114,12 +114,12 @@ class FHEO:
         n_fh = max(1, int(n * self.cfg.fire_hawk_fraction))
 
         for t in range(self.cfg.iterations):
-            order = fitness.argsort()[::-1]  # best first
+            order = fitness.argsort()[::-1]
             fire_hawks = order[:n_fh]
             prey = order[n_fh:]
             global_best = pop[order[0]].copy()
 
-            # Fire Hawk phase
+            #  Fire Hawk phase
             for i in fire_hawks:
                 other = pop[self.rng.choice(fire_hawks)]
                 r1, r2 = self.rng.random(), self.rng.random()
@@ -131,7 +131,7 @@ class FHEO:
                 r = self.rng.random()
                 pop[j] = np.clip(pop[j] + r * (safe - pop[j]), 0.0, 1.0)
 
-            # Election Optimizer refinement
+            #   Election Optimizer refinement
             beta = 1.0 - (t / self.cfg.iterations) ** 2
             mean_pos = pop.mean(axis=0)
             for i in range(n):
@@ -184,7 +184,7 @@ def tune_relational_head(
     """
     from dataclasses import replace
 
-    from train import accumulate_fold_dice, train_one_fold
+    from train_relational_head import accumulate_fold_dice, train_one_fold
 
     space = space or default_search_space()
 
@@ -203,7 +203,7 @@ def tune_relational_head(
             batch_size=int(params["batch_size"]),
             lr=float(params["lr"]),
         )
-        inter, pred, gt, _, _, _ = accumulate_fold_dice(
+        inter, pred, gt, _test_loss, _correct, _total = accumulate_fold_dice(
             head,
             detector,
             fold_dir,

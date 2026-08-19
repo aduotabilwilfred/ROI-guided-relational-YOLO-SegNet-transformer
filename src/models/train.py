@@ -3,18 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Dict, List, Path, Tuple
+from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-sys.path.inser(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from models.train_handoff import FrozenYOLOFeatures
 from utils.losses import bce_dice_loss
-from utils.relational_head import HeadConfig, buildHead
+from utils.relational_head import HeadConfig, build_head
 
 
 class MLflowRun:
@@ -99,7 +99,7 @@ class FoldImageDataset(Dataset):
             cv2.fillPoly(mask, [pts], 1)
         return mask
 
-    def __getitem__(self, index: int) -> Dict:
+    def __getitem__(self, index: int) -> dict:
         """
         YOLOv8's first conv expects 3 channels so the single
         grayscale channels is replicated to R=G=B
@@ -116,7 +116,7 @@ class FoldImageDataset(Dataset):
         }
 
 
-def collate(batch: List[Dict]) -> Dict:
+def collate(batch: list[dict]) -> dict:
     return {
         "image": torch.stack([b["image"] for b in batch]),
         "mask": torch.stack([b["mask"] for b in batch]),
@@ -137,7 +137,7 @@ def train_one_fold(
 ) -> torch.nn.Module:
     detector = FrozenYOLOFeatures(str(weights), imgsz=cfg.image_size)
     detector.model.to(device)
-    head = buildHead(cfg).to(device)
+    head = build_head(cfg).to(device)
     opt = torch.optim.AdamW(head.parameters(), lr=lr)
 
     train_ds = FoldImageDataset(fold_dir, "train", cfg.image_size)
@@ -195,7 +195,7 @@ def train_one_fold(
 @torch.no_grad()
 def accumulate_fold_dice(
     head, detector, fold_dir: Path, cfg: HeadConfig, device: str, batch_size: int
-) -> Tuple[int, int, int, float, int, int]:
+) -> tuple[int, int, int, float, int, int]:
     """
     Return (intersection, pred_area, gt_area, test_loss, correct, total) over a fold's test images
     """
@@ -344,10 +344,9 @@ def main() -> int:
             f" fold {fold} test loss {test_loss:.4f} | dice {fold_dice:.4f} | acc {test_acc:.4f}"
         )
 
-        if mlrun is not None:
-            mlrun.log_metric(f"fold_{fold}_test_loss", test_loss, step=args.epochs)
-            mlrun.log_metric(f"fold_{fold}_test_dice", fold_dice, step=args.epochs)
-            mlrun.log_metric(f"fold_{fold}_test_acc", test_acc, step=args.epochs)
+        mlrun.log_metric(f"fold_{fold}_test_loss", test_loss, step=args.epochs)
+        mlrun.log_metric(f"fold_{fold}_test_dice", fold_dice, step=args.epochs)
+        mlrun.log_metric(f"fold_{fold}_test_acc", test_acc, step=args.epochs)
 
         total_inter += inter
         total_pred += pred
