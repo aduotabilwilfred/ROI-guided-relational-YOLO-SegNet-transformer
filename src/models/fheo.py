@@ -203,7 +203,7 @@ def tune_relational_head(
             batch_size=int(params["batch_size"]),
             lr=float(params["lr"]),
         )
-        inter, pred, gt = accumulate_fold_dice(
+        inter, pred, gt, _, _, _ = accumulate_fold_dice(
             head,
             detector,
             fold_dir,
