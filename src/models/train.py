@@ -149,6 +149,7 @@ def train_one_fold(
     for epoch in range(epochs):
         running = 0.0
         train_inter = train_pred = train_gt = 0
+        train_correct = train_total = 0
         for batch in loader:
             images = batch["image"].to(device)
             targets = batch["mask"].unsqueeze(1).to(device)
@@ -172,27 +173,31 @@ def train_one_fold(
                 train_inter += int((pred * targets).sum().item())
                 train_pred += int(pred.sum().item())
                 train_gt += int(targets.sum().item())
+                train_correct += int((pred == targets).sum().item())
+                train_total += targets.numel()
 
         epoch_loss = running / len(loader)
         eps = 1e-7
         train_dice = (2 * train_inter + eps) / (train_pred + train_gt + eps)
+        train_acc = train_correct / train_total if train_total > 0 else 0.0
         print(
-            f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | loss {epoch_loss:.4f} | dice {train_dice:.4f} "
+            f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | loss {epoch_loss:.4f} | dice {train_dice:.4f} | acc {train_acc:.4f}"
         )
 
         if mlrun is not None:
             #  global step across folds keeps curves distinct per fold
             mlrun.log_metric(f"fold_{fold_idx}_train_loss", epoch_loss, step=epoch)
             mlrun.log_metric(f"fold_{fold_idx}_train_dice", train_dice, step=epoch)
+            mlrun.log_metric(f"fold_{fold_idx}_train_acc", train_acc, step=epoch)
     return head, detector
 
 
 @torch.no_grad()
 def accumulate_fold_dice(
     head, detector, fold_dir: Path, cfg: HeadConfig, device: str, batch_size: int
-) -> Tuple[int, int, int, float]:
+) -> Tuple[int, int, int, float, int, int]:
     """
-    Return (intersection, pred_area, gt_area, test_loss) over a fold's test images
+    Return (intersection, pred_area, gt_area, test_loss, correct, total) over a fold's test images
     """
 
     head.eval()
@@ -201,6 +206,7 @@ def accumulate_fold_dice(
 
     inter = pred_area = gt_area = 0
     running_loss = 0.0
+    correct = total = 0
 
     for batch in loader:
         images = batch["image"].to(device)
@@ -216,8 +222,10 @@ def accumulate_fold_dice(
         inter += int((pred * targets).sum().item())
         pred_area += int(pred.sum().item())
         gt_area += int(targets.sum().item())
+        correct += int((pred == targets).sum().item())
+        total += targets.numel()
 
-    return inter, pred_area, gt_area, running_loss / len(loader)
+    return inter, pred_area, gt_area, running_loss / len(loader), correct, total
 
 
 def parse_args() -> argparse.Namespace:
@@ -287,6 +295,7 @@ def main() -> int:
     )
 
     total_inter = total_pred = total_gt = 0
+    total_correct = total_pixels = 0
     per_fold = {}
 
     for fold in range(args.n_folds):
@@ -312,7 +321,7 @@ def main() -> int:
 
         torch.save(head.state_dict(), args.output / f"head_fold{fold}.pth")
 
-        inter, pred, gt, test_loss = accumulate_fold_dice(
+        inter, pred, gt, test_loss, test_correct, test_total = accumulate_fold_dice(
             head=head,
             detector=detector,
             fold_dir=fold_dir,
@@ -322,30 +331,41 @@ def main() -> int:
         )
         eps = 1e-7
         fold_dice = (2 * inter + eps) / (pred + gt + eps)
+        test_acc = test_correct / test_total if test_total > 0 else 0.0
         per_fold[fold] = {
             "dice": fold_dice,
+            "acc": test_acc,
             "intersection": inter,
             "pred_area": pred,
             "gt_area": gt,
             "test_loss": test_loss,
         }
-        print(f" fold {fold} test loss {test_loss:.4f} | dice {fold_dice:.4f}")
+        print(
+            f" fold {fold} test loss {test_loss:.4f} | dice {fold_dice:.4f} | acc {test_acc:.4f}"
+        )
 
         if mlrun is not None:
             mlrun.log_metric(f"fold_{fold}_test_loss", test_loss, step=args.epochs)
             mlrun.log_metric(f"fold_{fold}_test_dice", fold_dice, step=args.epochs)
+            mlrun.log_metric(f"fold_{fold}_test_acc", test_acc, step=args.epochs)
 
         total_inter += inter
         total_pred += pred
         total_gt += gt
+        total_correct += test_correct
+        total_pixels += test_total
 
     pooled = (2 * total_inter + 1e-7) / (total_pred + total_gt + eps)
-    report = {"pooled_dice": pooled, "per_fold": per_fold}
+    pooled_acc = total_correct / total_pixels if total_pixels > 0 else 0.0
+    report = {"pooled_dice": pooled, "pooled_acc": pooled_acc, "per_fold": per_fold}
     (args.output / "pooled_metrics.json").write_text(json.dumps(report, indent=2))
     mlrun.log_metric("pooled_dice", pooled)
+    mlrun.log_metric("pooled_acc", pooled_acc)
     mlrun.end()
 
-    print(f"\npooled Dice over all test folds: {pooled:.4f}")
+    print(
+        f"\npooled Dice over all test folds: {pooled:.4f} | pooled Acc: {pooled_acc:.4f}"
+    )
     print(f"metrics written to {args.output / 'pooled_metrics.json'}")
     return 0
 
