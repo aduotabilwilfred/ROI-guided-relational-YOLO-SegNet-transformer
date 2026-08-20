@@ -108,42 +108,44 @@ raw dataset itself:
 ### Run the Data Pipeline
 
 ```bash
-make data         # dvc repro build_fold_ultralytics — CPU only, no GPU needed
+make data            # dvc repro build_fold_ultralytics — CPU only, no GPU needed
 ```
 
 Runs `prepare_dataset → make_folds → fold_calibration → build_fold_ultralytics`.
-All of it is OpenCV/NumPy/SciPy, so it reproduces identically on a
-GPU-less machine.
+All of it is OpenCV/NumPy/SciPy, so it reproduces identically on a GPU-less machine.
 
-### Train the Model
+### Train the Two-Stage Model
+
+Training is split into two GPU-bound stages:
+
+1. **Stage 1 — Train Detector (YOLOv8-seg):**
+   ```bash
+   make train_detector  # dvc repro train_detector — trains YOLOv8-seg per fold
+   ```
+   Produces the frozen detector weights (`best.pt` per fold) required by the relational head.
+
+2. **Stage 2 — Train Relational Segmentation Head:**
+   ```bash
+   make train_head      # dvc repro train_head — trains BiLRA + RTrB + AllMLPDecoder head
+   ```
+   Hooks neck features from the frozen detector and trains the relational head end-to-end.
+
+3. **Optional — Hyperparameter Tuning (FHEO):**
+   ```bash
+   make tune_fheo       # dvc repro tune_fheo — runs Fire Hawk + Election Optimizer
+   ```
+   Evaluates hyperparameter candidates on the `val` split for fold 0 and exports `outputs/fheo/best_params.json`.
+
+### Run All Default Pipeline Steps
 
 ```bash
-make train        # dvc repro train_folds — needs outputs/ultralytics_folds from `make data`
-```
-
-Trains YOLOv8-seg per fold via Ultralytics. This is the only GPU-bound
-stage; `--device` is left unset so Ultralytics auto-selects a GPU if one is
-available and falls back to CPU otherwise. Exact metrics can vary slightly
-across different GPU models/drivers even with the same seed and
-hyperparameters — that's expected, not a reproduction failure.
-
-**Splitting the work across machines:** whoever doesn't have a GPU runs
-`make data` locally to produce `outputs/ultralytics_folds`; whoever has the
-GPU either regenerates the same folder by running `make data` themselves
-(same dataset in → same output, since the stage is deterministic) or
-receives it directly, then runs `make train`.
-
-### Run All Steps
-
-```bash
-make all          # runs: setup → data → train → test
+make all             # runs: data → train_detector → train_head
 ```
 
 ### Other Commands
 
 ```bash
-make test         # run the test suite with pytest
-make clean        # remove cache directories and virtual environment
+make clean           # remove cache directories and virtual environment
 ```
 
 ## Data & Model Versioning
