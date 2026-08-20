@@ -39,14 +39,29 @@ stages:
     outs:
       - outputs/ultralytics_folds
 
-  train:
-    cmd: python src/models/train.py --folds-root outputs/ultralytics_folds --detector-project runs/segment_cv --output runs/relational_head
+  # Stage one of the two-stage model: train the YOLOv8 detector on each fold.
+  # Produces the frozen detector weights (best.pt per fold) that the head needs.
+  # GPU-bound; run explicitly on a GPU machine.
+  train_detector:
+    cmd: python src/models/train_folds.py --manifest outputs/folds/cv_manifest.csv --folds-root outputs/ultralytics_folds --project runs/segment_cv --imgsz 512
     deps:
       - outputs/ultralytics_folds
-      - src/models/train.py
+      - outputs/folds/cv_manifest.csv
+      - src/models/train_folds.py
       - src/data/make_folds.py
+    outs:
+      - runs/segment_cv
+
+  # Stage two: train the relational head on the frozen detector's features.
+  # Consumes the detector weights from train_detector. GPU-bound.
+  train_head:
+    cmd: python src/models/train.py --folds-root outputs/ultralytics_folds --detector-project runs/segment_cv --output runs/relational_head --epochs 50 --batch-size 8 --lr 1e-4 --image-size 512
+    deps:
+      - outputs/ultralytics_folds
+      - runs/segment_cv
+      - src/models/train.py
       - src/models/train_handoff.py
-      - src/models/fheo.py
+      - src/data/make_folds.py
       - src/utils/losses.py
       - src/utils/allmlp_decoder.py
       - src/utils/bilra_attention.py
@@ -55,4 +70,25 @@ stages:
       - src/utils/roi_partition.py
       - src/utils/rtrb.py
     outs:
-      - runs/segment_cv
+      - runs/relational_head
+
+  # Optional hyperparameter tuning. Not chained into the default flow: run
+  # explicitly (dvc repro tune_fheo) only when you want to tune. Scores
+  # candidates on the val subset, on fold_0. Depends on the detector weights.
+  tune_fheo:
+    cmd: python src/models/fheo.py --fold-dir outputs/ultralytics_folds/fold_0 --weights runs/segment_cv/fold_0/weights/best.pt --output outputs/fheo/best_params.json --population 8 --iterations 10 --eval-epochs 10 --device cuda
+    deps:
+      - outputs/ultralytics_folds/fold_0
+      - runs/segment_cv/fold_0/weights/best.pt
+      - src/models/fheo.py
+      - src/models/train.py
+      - src/models/train_handoff.py
+      - src/utils/losses.py
+      - src/utils/allmlp_decoder.py
+      - src/utils/bilra_attention.py
+      - src/utils/efficient_attention.py
+      - src/utils/relational_head.py
+      - src/utils/roi_partition.py
+      - src/utils/rtrb.py
+    outs:
+      - outputs/fheo/best_params.json
