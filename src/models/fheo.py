@@ -210,6 +210,7 @@ def tune_relational_head(
             cfg_candidate,
             device,
             batch_size=int(params["batch_size"]),
+            role="val",
         )
         return (2 * inter + 1e-7) / (pred + gt + 1e-7)
 
@@ -259,12 +260,12 @@ def main():
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from relational_head import HeadConfig
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from utils.relational_head import HeadConfig
 
     args = parse_args()
     base_cfg = HeadConfig(image_size=args.image_size)
-    fheo_cfg = HeadConfig(
+    fheo_cfg = FHEOConfig(
         population=args.population, iterations=args.iterations, seed=args.seed
     )
 

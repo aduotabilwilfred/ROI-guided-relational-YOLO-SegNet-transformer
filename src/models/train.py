@@ -206,13 +206,14 @@ def accumulate_fold_dice(
     device: str,
     batch_size: int,
     presence_min_pixels: int = 20,
+    role: str = "test",
 ) -> tuple[int, int, int, float, int, int]:
     """
     Return (intersection, pred_area, gt_area, test_loss, correct, total) over a fold's test images
     """
 
     head.eval()
-    ds = FoldImageDataset(fold_dir, "test", cfg.image_size)
+    ds = FoldImageDataset(fold_dir, role, cfg.image_size)
     loader = DataLoader(ds, batch_size=batch_size, collate_fn=collate, shuffle=False)
 
     inter = pred_area = gt_area = 0
