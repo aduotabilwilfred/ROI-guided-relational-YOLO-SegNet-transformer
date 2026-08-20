@@ -214,3 +214,88 @@ def tune_relational_head(
         return (2 * inter + 1e-7) / (pred + gt + 1e-7)
 
     return FHEO(space, fitness, cfg).optimise()
+
+
+def parse_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Tune the relational head's hyperparameters with FHEO."
+    )
+    parser.add_argument(
+        "--fold-dir",
+        type=str,
+        required=True,
+        help="one fold's Ultralytics dir, e.g. outputs/ultralytics_folds/fold_0",
+    )
+    parser.add_argument(
+        "--weights",
+        type=str,
+        required=True,
+        help="that fold's trained YOLO weights (best.pt)",
+    )
+    parser.add_argument("--output", type=str, default="outputs/fheo/best_params.json")
+    parser.add_argument("--device", default="cuda", help="cuda or cpu")
+    parser.add_argument(
+        "--eval-epochs",
+        type=int,
+        default=10,
+        help="epochs per candidate (short, for ranking)",
+    )
+    parser.add_argument(
+        "--population",
+        type=int,
+        default=8,
+        help="candidates per generation (small = feasible)",
+    )
+    parser.add_argument("--iterations", type=int, default=10, help="FHEO iterations")
+    parser.add_argument("--image-size", type=int, default=512)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
+
+
+def main():
+    import json
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from relational_head import HeadConfig
+
+    args = parse_args()
+    base_cfg = HeadConfig(image_size=args.image_size)
+    fheo_cfg = HeadConfig(
+        population=args.population, iterations=args.iterations, seed=args.seed
+    )
+
+    result = tune_relational_head(
+        fold_dir=Path(args.fold_dir),
+        weights=Path(args.weights),
+        base_cfg=base_cfg,
+        device=args.device,
+        eval_epochs=args.eval_epochs,
+        cfg=fheo_cfg,
+    )
+
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        json.dumps(
+            {
+                "best_params": result.best_params,
+                "best_fitness": result.best_fitness,
+                "history": result.history,
+            },
+            indent=2,
+        )
+    )
+
+    print("best hyperparameters found")
+    for k, v in result.best_params.items():
+        print(f" {k}: {v}")
+    print(f"best validation Dice: {result.best_fitness:.4f}")
+    print(f"written to {out}")
+
+
+if __name__ == "__main__":
+    main()
