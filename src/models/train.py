@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import statistics
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -21,6 +23,53 @@ CLASSIFICATION_METRIC_NOTE = (
     "strong aspect-ratio/acquisition shortcut. It is not used for checkpoint "
     "selection, early stopping, or model ranking."
 )
+
+
+def detector_checkpoint_for_fold(detector_project: Path, fold: int) -> Path:
+    """Return the only detector checkpoint valid for a relational CV fold."""
+    return detector_project / f"fold_{fold}" / "weights" / "best.pt"
+
+
+def verify_detector_fold_alignment(
+    detector_checkpoint: Path, fold_dir: Path, fold: int
+) -> None:
+    """Reject detector/data fold mismatches before constructing either model."""
+    expected_fold = f"fold_{fold}"
+    if fold_dir.name != expected_fold:
+        raise RuntimeError(
+            f"fold data mismatch: requested {expected_fold}, got {fold_dir}"
+        )
+    if detector_checkpoint.parent.parent.name != expected_fold:
+        raise RuntimeError(
+            "detector checkpoint path is not aligned with the requested fold: "
+            f"expected .../{expected_fold}/weights/best.pt, got "
+            f"{detector_checkpoint}"
+        )
+
+    payload = torch.load(
+        detector_checkpoint, map_location="cpu", weights_only=False
+    )
+    train_args = payload.get("train_args") if isinstance(payload, dict) else None
+    if not isinstance(train_args, dict):
+        raise RuntimeError(
+            f"detector checkpoint has no Ultralytics train_args: {detector_checkpoint}"
+        )
+
+    recorded_name = str(train_args.get("name", ""))
+    recorded_data = str(train_args.get("data", "")).replace("\\", "/")
+    expected_data_suffix = f"/{expected_fold}/dataset.yaml"
+    if recorded_name != expected_fold or not (
+        f"/{recorded_data.lstrip('/')}"
+    ).endswith(expected_data_suffix):
+        raise RuntimeError(
+            "detector checkpoint metadata is not aligned with the requested fold: "
+            f"requested={expected_fold}, recorded name={recorded_name!r}, "
+            f"recorded data={recorded_data!r}"
+        )
+
+
+def _ratio(numerator: int | float, denominator: int | float) -> float:
+    return float(numerator / denominator) if denominator else 0.0
 
 
 class MLflowRun:
@@ -238,6 +287,7 @@ def evaluate_split(
     positive_inter = positive_pred_area = positive_gt_area = 0
     total_loss = segmentation_loss = classification_loss = 0.0
     correct = total = 0
+    true_positive = true_negative = false_positive = false_negative = 0
 
     for batch in loader:
         images = batch["image"].to(device)
@@ -275,13 +325,27 @@ def evaluate_split(
             positive_pred_area += int(positive_pred.sum().item())
             positive_gt_area += int(positive_target.sum().item())
 
-        correct += int(((cls_logits > 0) == cls_targets.bool()).sum().item())
+        cls_pred = (cls_logits > 0).flatten()
+        cls_true = cls_targets.bool().flatten()
+        correct += int((cls_pred == cls_true).sum().item())
+        true_positive += int((cls_pred & cls_true).sum().item())
+        true_negative += int((~cls_pred & ~cls_true).sum().item())
+        false_positive += int((cls_pred & ~cls_true).sum().item())
+        false_negative += int((~cls_pred & cls_true).sum().item())
         total += batch_size_actual
 
     if was_training:
         head.train()
 
     eps = 1e-7
+    union = pred_area + gt_area - inter
+    positive_union = positive_pred_area + positive_gt_area - positive_inter
+    classification_precision = _ratio(
+        true_positive, true_positive + false_positive
+    )
+    classification_recall = _ratio(
+        true_positive, true_positive + false_negative
+    )
     return {
         "total_loss": total_loss / total,
         "segmentation_loss": segmentation_loss / total,
@@ -289,7 +353,32 @@ def evaluate_split(
         "dice": (2 * inter + eps) / (pred_area + gt_area + eps),
         "positive_dice": (2 * positive_inter + eps)
         / (positive_pred_area + positive_gt_area + eps),
+        "iou": _ratio(inter, union),
+        "jaccard": _ratio(inter, union),
+        "segmentation_precision": _ratio(inter, pred_area),
+        "segmentation_recall": _ratio(inter, gt_area),
+        "segmentation_f1": (2 * inter + eps) / (pred_area + gt_area + eps),
+        "positive_iou": _ratio(positive_inter, positive_union),
+        "positive_segmentation_precision": _ratio(
+            positive_inter, positive_pred_area
+        ),
+        "positive_segmentation_recall": _ratio(positive_inter, positive_gt_area),
+        "positive_segmentation_f1": (2 * positive_inter + eps)
+        / (positive_pred_area + positive_gt_area + eps),
         "classification_accuracy": correct / total,
+        "classification_precision": classification_precision,
+        "classification_recall": classification_recall,
+        "classification_f1": _ratio(
+            2 * classification_precision * classification_recall,
+            classification_precision + classification_recall,
+        ),
+        "classification_specificity": _ratio(
+            true_negative, true_negative + false_positive
+        ),
+        "classification_true_positive": true_positive,
+        "classification_true_negative": true_negative,
+        "classification_false_positive": false_positive,
+        "classification_false_negative": false_negative,
         "intersection": inter,
         "pred_area": pred_area,
         "gt_area": gt_area,
@@ -358,7 +447,10 @@ def train_one_fold(
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     history = []
     best_positive_dice = float("-inf")
+    best_epoch = None
     epochs_without_improvement = 0
+    training_started = time.perf_counter()
+    stopped_early = False
     training_config = {
         "fold": fold_idx,
         "fold_dir": str(fold_dir),
@@ -399,6 +491,7 @@ def train_one_fold(
 
     print(CLASSIFICATION_METRIC_NOTE)
     for epoch_index in range(epochs):
+        epoch_started = time.perf_counter()
         head.train()
         running = 0.0
         running_seg = 0.0
@@ -473,6 +566,7 @@ def train_one_fold(
         improved = positive_dice > best_positive_dice
         if improved:
             best_positive_dice = positive_dice
+            best_epoch = epoch_index + 1
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
@@ -495,6 +589,8 @@ def train_one_fold(
             ],
             "best_checkpoint": improved,
             "epochs_without_improvement": epochs_without_improvement,
+            "epoch_duration_seconds": time.perf_counter() - epoch_started,
+            "elapsed_training_seconds": time.perf_counter() - training_started,
         }
         history.append(history_row)
         print(
@@ -574,7 +670,22 @@ def train_one_fold(
                     f" early stopping fold {fold_idx} at epoch {epoch}: "
                     f"validation positive Dice did not improve for {patience} epochs"
                 )
+                stopped_early = True
                 break
+
+    if output_dir is not None:
+        summary = {
+            "fold": fold_idx,
+            "epochs_completed": len(history),
+            "best_epoch": best_epoch,
+            "best_validation_positive_dice": best_positive_dice,
+            "training_duration_seconds": time.perf_counter() - training_started,
+            "stopped_early": stopped_early,
+            "detector_checkpoint": str(weights.resolve()),
+        }
+        (output_dir / f"training_summary_fold{fold_idx}.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
     return head, detector
 
 
@@ -613,6 +724,96 @@ def accumulate_fold_dice(
         metrics["correct"],
         metrics["total"],
     )
+
+
+AGGREGATE_METRICS = {
+    "test_dice": ("test_metrics", "dice"),
+    "tumour_positive_test_dice": ("test_metrics", "positive_dice"),
+    "test_iou_jaccard": ("test_metrics", "iou"),
+    "tumour_positive_test_iou_jaccard": ("test_metrics", "positive_iou"),
+    "segmentation_precision": ("test_metrics", "segmentation_precision"),
+    "segmentation_recall": ("test_metrics", "segmentation_recall"),
+    "segmentation_f1": ("test_metrics", "segmentation_f1"),
+    "classification_accuracy_diagnostic": (
+        "test_metrics",
+        "classification_accuracy",
+    ),
+    "classification_precision_diagnostic": (
+        "test_metrics",
+        "classification_precision",
+    ),
+    "classification_recall_diagnostic": (
+        "test_metrics",
+        "classification_recall",
+    ),
+    "classification_f1_diagnostic": ("test_metrics", "classification_f1"),
+    "classification_specificity_diagnostic": (
+        "test_metrics",
+        "classification_specificity",
+    ),
+    "best_epoch": ("best_epoch",),
+    "validation_positive_dice": ("validation_positive_dice",),
+    "training_duration_seconds": ("training_duration_seconds",),
+}
+
+
+def write_fold_metrics(output_dir: Path, fold: int, report: dict) -> Path:
+    """Persist one held-out result without touching any other fold's report."""
+    path = output_dir / f"fold_{fold}_metrics.json"
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return path
+
+
+def aggregate_completed_fold_metrics(
+    output_dir: Path, n_folds: int
+) -> dict | None:
+    """Aggregate only after all independently persisted fold reports exist."""
+    paths = [output_dir / f"fold_{fold}_metrics.json" for fold in range(n_folds)]
+    if not all(path.exists() for path in paths):
+        return None
+
+    folds = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    expected = list(range(n_folds))
+    actual = [report.get("fold") for report in folds]
+    if actual != expected:
+        raise RuntimeError(
+            f"cannot aggregate misaligned fold reports: expected {expected}, got {actual}"
+        )
+
+    experiment_keys = ("detector_project", "detector_conf", "image_size")
+    for key in experiment_keys:
+        values = {str(report.get(key)) for report in folds}
+        if len(values) != 1:
+            raise RuntimeError(
+                f"cannot aggregate fold reports with inconsistent {key}: {values}"
+            )
+
+    summary = {}
+    for metric, keys in AGGREGATE_METRICS.items():
+        values = []
+        for report in folds:
+            value = report
+            for key in keys:
+                value = value[key]
+            values.append(float(value))
+        summary[metric] = {
+            "mean": statistics.fmean(values),
+            "std": statistics.pstdev(values),
+            "values_by_fold": values,
+        }
+
+    aggregate = {
+        "n_folds": n_folds,
+        "standard_deviation": "population (ddof=0)",
+        "checkpoint_selection_metric": "validation_positive_dice",
+        "classification_metric_note": CLASSIFICATION_METRIC_NOTE,
+        "fold_reports": [path.name for path in paths],
+        "summary": summary,
+    }
+    (output_dir / "aggregate_metrics.json").write_text(
+        json.dumps(aggregate, indent=2), encoding="utf-8"
+    )
+    return aggregate
 
 
 def parse_args() -> argparse.Namespace:
@@ -740,16 +941,18 @@ def main() -> int:
     eps = 1e-7
     per_fold = {}
 
-    if args.only_fold >= args.n_folds:
+    if args.only_fold < -1 or args.only_fold >= args.n_folds:
         raise SystemExit(f"--only-fold must be between 0 and {args.n_folds - 1}")
-    folds = range(args.n_folds) if args.only_fold < 0 else [args.only_fold]
+    folds = list(range(args.n_folds)) if args.only_fold < 0 else [args.only_fold]
     for fold in folds:
         fold_dir = args.folds_root / f"fold_{fold}"
-        weights = args.detector_project / f"fold_{fold}/weights/best.pt"
+        weights = detector_checkpoint_for_fold(args.detector_project, fold)
         if not weights.exists():
             raise SystemExit(
-                f"detector weights not found: {weights}\ntrain the YOLOv8 detector (train.py) first"
+                f"detector weights not found: {weights}\n"
+                "train this fold's YOLOv8 detector (train_folds.py) first"
             )
+        verify_detector_fold_alignment(weights, fold_dir, fold)
 
         print(f"=== training relational head, fold {fold} ==")
         head, detector = train_one_fold(
@@ -797,6 +1000,34 @@ def main() -> int:
             "checkpoint": str(best_checkpoint),
             **test_metrics,
         }
+        training_summary_path = args.output / f"training_summary_fold{fold}.json"
+        training_summary = (
+            json.loads(training_summary_path.read_text(encoding="utf-8"))
+            if training_summary_path.exists()
+            else {}
+        )
+        validation_metrics = checkpoint.get("validation_metrics", {})
+        fold_report = {
+            "fold": fold,
+            "fold_data": str(fold_dir.resolve()),
+            "detector_project": str(args.detector_project.resolve()),
+            "detector_checkpoint": str(weights.resolve()),
+            "detector_conf": args.detector_conf,
+            "head_checkpoint": str(best_checkpoint.resolve()),
+            "image_size": args.image_size,
+            "best_epoch": checkpoint.get("epoch"),
+            "validation_positive_dice": validation_metrics.get(
+                "positive_dice",
+                training_summary.get("best_validation_positive_dice"),
+            ),
+            "training_duration_seconds": training_summary.get(
+                "training_duration_seconds", 0.0
+            ),
+            "classification_metric_note": CLASSIFICATION_METRIC_NOTE,
+            "test_metrics": test_metrics,
+        }
+        fold_metrics_path = write_fold_metrics(args.output, fold, fold_report)
+        print(f" fold {fold} metrics written to {fold_metrics_path}")
         print(
             f" fold {fold} BEST-checkpoint test loss "
             f"{test_metrics['total_loss']:.4f} | dice {test_metrics['dice']:.4f} "
@@ -849,7 +1080,14 @@ def main() -> int:
         "classification_metric_note": CLASSIFICATION_METRIC_NOTE,
         "per_fold": per_fold,
     }
-    (args.output / "pooled_metrics.json").write_text(json.dumps(report, indent=2))
+    pooled_name = (
+        f"pooled_metrics_fold{folds[0]}.json"
+        if len(folds) == 1
+        else "pooled_metrics.json"
+    )
+    pooled_path = args.output / pooled_name
+    pooled_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    aggregate = aggregate_completed_fold_metrics(args.output, args.n_folds)
     mlrun.log_metric("pooled_dice", pooled)
     mlrun.log_metric("pooled_positive_dice", pooled_positive)
     mlrun.log_metric("pooled_acc", pooled_acc)
@@ -860,7 +1098,17 @@ def main() -> int:
         f"positive Dice: {pooled_positive:.4f} | "
         f"classification Acc: {pooled_acc:.4f} (diagnostic only)"
     )
-    print(f"metrics written to {args.output / 'pooled_metrics.json'}")
+    print(f"metrics written to {pooled_path}")
+    if aggregate is None:
+        completed = sum(
+            (args.output / f"fold_{fold}_metrics.json").exists()
+            for fold in range(args.n_folds)
+        )
+        print(
+            f"aggregate pending: {completed}/{args.n_folds} fold reports complete"
+        )
+    else:
+        print(f"five-fold mean/std written to {args.output / 'aggregate_metrics.json'}")
     return 0
 
 

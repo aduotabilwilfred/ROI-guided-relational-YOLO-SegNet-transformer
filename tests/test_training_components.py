@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 import tempfile
 import types
@@ -331,6 +332,106 @@ class TrainingCLITests(unittest.TestCase):
         self.assertTrue(args.amp)
         self.assertEqual(args.workers, 0)
 
+    def test_each_cv_fold_is_accepted_by_both_clis(self):
+        for fold in range(5):
+            with self.subTest(fold=fold):
+                with patch.object(
+                    sys, "argv", ["train_folds", "--only-fold", str(fold)]
+                ):
+                    detector_args = train_folds.parse_args()
+                with patch.object(
+                    sys, "argv", ["train", "--only-fold", str(fold)]
+                ):
+                    relational_args = train.parse_args()
+
+                self.assertEqual(detector_args.only_fold, fold)
+                self.assertEqual(relational_args.only_fold, fold)
+                self.assertEqual(
+                    train.detector_checkpoint_for_fold(
+                        Path("runs/final_yolov8s_cv"), fold
+                    ),
+                    Path(f"runs/final_yolov8s_cv/fold_{fold}/weights/best.pt"),
+                )
+
+
+class CrossValidationIsolationTests(unittest.TestCase):
+    def test_detector_checkpoint_metadata_must_match_requested_fold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for fold in range(5):
+                checkpoint = (
+                    root / "detectors" / f"fold_{fold}" / "weights" / "best.pt"
+                )
+                checkpoint.parent.mkdir(parents=True)
+                torch.save(
+                    {
+                        "train_args": {
+                            "name": f"fold_{fold}",
+                            "data": str(
+                                root
+                                / "folds"
+                                / f"fold_{fold}"
+                                / "dataset.yaml"
+                            ),
+                        }
+                    },
+                    checkpoint,
+                )
+                train.verify_detector_fold_alignment(
+                    checkpoint, root / "folds" / f"fold_{fold}", fold
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "not aligned"):
+                train.verify_detector_fold_alignment(
+                    root / "detectors" / "fold_0" / "weights" / "best.pt",
+                    root / "folds" / "fold_1",
+                    1,
+                )
+
+    def test_five_individual_reports_are_preserved_and_aggregated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir)
+            for fold in range(5):
+                test_metrics = {
+                    "dice": 0.2 + fold * 0.1,
+                    "positive_dice": 0.25 + fold * 0.1,
+                    "iou": 0.1 + fold * 0.05,
+                    "positive_iou": 0.12 + fold * 0.05,
+                    "segmentation_precision": 0.3 + fold * 0.05,
+                    "segmentation_recall": 0.4 + fold * 0.05,
+                    "segmentation_f1": 0.2 + fold * 0.1,
+                    "classification_accuracy": 0.9,
+                    "classification_precision": 0.9,
+                    "classification_recall": 0.9,
+                    "classification_f1": 0.9,
+                    "classification_specificity": 0.9,
+                }
+                train.write_fold_metrics(
+                    output,
+                    fold,
+                    {
+                        "fold": fold,
+                        "detector_project": "detectors",
+                        "detector_conf": 0.025,
+                        "image_size": 512,
+                        "best_epoch": fold + 1,
+                        "validation_positive_dice": 0.3 + fold * 0.1,
+                        "training_duration_seconds": 100 + fold,
+                        "test_metrics": test_metrics,
+                    },
+                )
+
+            aggregate = train.aggregate_completed_fold_metrics(output, 5)
+
+            self.assertIsNotNone(aggregate)
+            self.assertAlmostEqual(aggregate["summary"]["test_dice"]["mean"], 0.4)
+            self.assertGreater(aggregate["summary"]["test_dice"]["std"], 0)
+            self.assertTrue((output / "aggregate_metrics.json").exists())
+            for fold in range(5):
+                path = output / f"fold_{fold}_metrics.json"
+                self.assertTrue(path.exists())
+                self.assertEqual(json.loads(path.read_text())["fold"], fold)
+
 
 class ScientificTrainingWorkflowTests(unittest.TestCase):
     @staticmethod
@@ -525,6 +626,7 @@ class ScientificTrainingWorkflowTests(unittest.TestCase):
                     "train_one_fold",
                     return_value=(head, object()),
                 ) as fit,
+                patch.object(train, "verify_detector_fold_alignment"),
                 patch.object(train, "load_head_checkpoint", side_effect=load_best),
                 patch.object(train, "evaluate_split", side_effect=evaluate_test),
             ):

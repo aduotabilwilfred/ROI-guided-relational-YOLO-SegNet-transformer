@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     _records, _seed, n_folds = load_manifest(args.manifest)
-    if args.only_fold >= n_folds:
+    if args.only_fold < -1 or args.only_fold >= n_folds:
         raise SystemExit(f"--only-fold must be between 0 and {n_folds - 1}")
 
     folds = range(n_folds) if args.only_fold < 0 else [args.only_fold]
