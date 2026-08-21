@@ -5,16 +5,18 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from utils.allmlp_decoder import AllMLPDecoder
-from utils.bilra_attention import BiLevelRoutingAttention
-from utils.roi_partition import build_roi_masks
-from utils.rtrb import RelationalTransformerBlock
+from .allmlp_decoder import AllMLPDecoder
+from .bilra_attention import BiLevelRoutingAttention
+from .roi_partition import build_roi_masks
+from .rtrb import RelationalTransformerBlock
 
 
 @dataclass
 class HeadConfig:
     image_size: int = 512
-    backbone_channels: tuple = (64, 128, 256)  # P3, P4, P5 (nano YOLOv8)
+    # Backwards-compatible standalone default. The training handoff replaces
+    # this tuple with the selected frozen detector's probed P3/P4/P5 channels.
+    backbone_channels: tuple[int, ...] = (64, 128, 256)
     embed_dim: int = 128
     num_heads: int = 8
     reduction: int = 4  # segformer efficient-attention (tunable)
@@ -59,7 +61,7 @@ class RelationalStage(nn.Module):
 
 
 class RelationalSegHead(nn.Module):
-    """Full segmentation head composing all six tested components"""
+    """Relational segmentation head with binary tumour-presence output."""
 
     def __init__(self, cfg: HeadConfig | None = None):
         super().__init__()
@@ -70,7 +72,6 @@ class RelationalSegHead(nn.Module):
         self.scale_proj = nn.ModuleList(
             [nn.Conv2d(ch, c.embed_dim, kernel_size=1) for ch in c.backbone_channels]
         )
-
         # one relational stage per backbone scale
         self.stages = nn.ModuleList(
             [RelationalStage(c, c.embed_dim) for _ in c.backbone_channels]
@@ -83,19 +84,46 @@ class RelationalSegHead(nn.Module):
             num_classes=c.num_classes,
             out_size=c.image_size,
         )
-
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(c.embed_dim, 1),
+        )
     def forward(
         self, feats: list[torch.Tensor], boxes: list[torch.Tensor]
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         c = self.cfg
+        if len(feats) != len(self.scale_proj):
+            raise ValueError(
+                f"expected {len(self.scale_proj)} feature maps, got {len(feats)}"
+            )
+        if not feats:
+            raise ValueError("at least one feature map is required")
+        if len(boxes) != feats[0].shape[0]:
+            raise ValueError(
+                f"expected boxes for {feats[0].shape[0]} images, got {len(boxes)}"
+            )
+
         stage_outputs = []
-        for proj, stage, feat in zip(self.scale_proj, self.stages, feats):
+        for scale, (proj, stage, feat) in enumerate(
+            zip(self.scale_proj, self.stages, feats)
+        ):
+            if feat.shape[1] != proj.in_channels:
+                raise ValueError(
+                    f"feature scale {scale} has {feat.shape[1]} channels; "
+                    f"head expects {proj.in_channels}"
+                )
             x = proj(feat)
             h, w = x.shape[-2:]
             masks = build_roi_masks(boxes, h, w, dilation=c.dilation, device=x.device)
 
             stage_outputs.append(stage(x, masks.m_mask, masks.w_mask))
-        return self.decoder(stage_outputs)
+
+        segmentation_logits = self.decoder(stage_outputs)
+        # The deepest relational representation carries the widest context and
+        # is already available, so classification adds only pooling + one logit.
+        classification_logits = self.classifier(stage_outputs[-1])
+        return segmentation_logits, classification_logits
 
 
 def buildHead(cfg: HeadConfig | None = None) -> RelationalSegHead:

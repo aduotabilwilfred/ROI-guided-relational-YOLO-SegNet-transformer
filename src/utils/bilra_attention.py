@@ -104,7 +104,15 @@ class BiLevelRoutingAttention(nn.Module):
         # merge heads and un-partition back to (b, c, h, w)
         out = out.permute(0, 1, 3, 2, 4).reshape(b, n_reg, tokens_per_reg, c)
         out = self.proj(out)
-        out = out.view(b, s, s, rh, rw, c).permute(0, 5, 1, 3, 2, 4)
+        # Regions were flattened in (region_row, region_col, token_row,
+        # token_col) order above.  Restore those axes, interleave each region
+        # coordinate with its within-region coordinate, and finally collapse
+        # them back to the original spatial map.
+        out = (
+            out.view(b, s, s, rh, rw, c)
+            .permute(0, 5, 1, 3, 2, 4)
+            .reshape(b, c, h, w)
+        )
 
         v_spatial = (
             v.view(b, s, s, rh, rw, c).permute(0, 5, 1, 3, 2, 4).reshape(b, c, h, w)

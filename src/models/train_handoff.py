@@ -21,11 +21,13 @@ class FrozenYOLOFeatures(nn.Module):
     Parameters
 
     weights : path to trained YOLOv8-seg weights (a fold's best.pt).
-    conf    : detection confidence threshold for box extraction.
-    imgsz   : inference size (must match how the head expects features, 512).
+    detector_conf : detection confidence threshold for box extraction.
+    imgsz         : inference size (must match how the head expects features, 512).
     """
 
-    def __init__(self, weights: str, conf: float = 0.25, imgsz: int = 512):
+    def __init__(
+        self, weights: str, detector_conf: float = 0.25, imgsz: int = 512
+    ):
         super().__init__()
         from ultralytics import YOLO
 
@@ -33,7 +35,7 @@ class FrozenYOLOFeatures(nn.Module):
         self.model = self.yolo.model.eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
-        self.conf = conf
+        self.detector_conf = detector_conf
         self.imgsz = imgsz
         self.source_layers = _find_segment_source_layers(self.model)
 
@@ -57,7 +59,31 @@ class FrozenYOLOFeatures(nn.Module):
         """
         self._feats.clear()
         self.model(images)
-        return [self._feats[idx] for idx in self.source_layers]
+        missing = [idx for idx in self.source_layers if idx not in self._feats]
+        if missing:
+            raise RuntimeError(f"YOLO feature hooks did not fire for layers {missing}")
+        features = [self._feats[idx] for idx in self.source_layers]
+        if not all(isinstance(feat, torch.Tensor) and feat.ndim == 4 for feat in features):
+            raise RuntimeError("YOLO source layers must each produce a BCHW tensor")
+        return features
+
+    @torch.no_grad()
+    def infer_feature_shapes(
+        self, image_size: int | None = None
+    ) -> tuple[tuple[int, int, int], ...]:
+        """Probe the selected detector and return its P3/P4/P5 ``(C, H, W)`` shapes."""
+        size = image_size or self.imgsz
+        parameter = next(self.model.parameters())
+        sample = torch.zeros(
+            1,
+            3,
+            size,
+            size,
+            device=parameter.device,
+            dtype=parameter.dtype,
+        )
+        features = self.extract_features(sample)
+        return tuple(tuple(int(value) for value in feature.shape[1:]) for feature in features)
 
     @torch.no_grad()
     def detect_boxes(self, image_paths: list[str]) -> list[torch.Tensor]:
@@ -67,8 +93,13 @@ class FrozenYOLOFeatures(nn.Module):
         Uses Ultralytics predict, which handles letterboxing and NMS.
         Each entry is (N_i, 4) in [0, 1]; empty (0, 4) when nothing is detected.
         """
+        device = next(self.model.parameters()).device
         results = self.yolo.predict(
-            image_paths, imgsz=self.imgsz, conf=self.conf, verbose=False
+            image_paths,
+            imgsz=self.imgsz,
+            conf=self.detector_conf,
+            device=str(device),
+            verbose=False,
         )
         boxes = []
         for r in results:

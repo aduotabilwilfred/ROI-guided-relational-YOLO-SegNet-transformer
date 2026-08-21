@@ -35,6 +35,29 @@ def bce_dice_loss(
     return bce_weight * bce + (1 - bce_weight) * dsc
 
 
+def segmentation_classification_loss(
+    segmentation_logits: torch.Tensor,
+    segmentation_target: torch.Tensor,
+    classification_logits: torch.Tensor,
+    classification_target: torch.Tensor,
+    seg_weight: float = 1.0,
+    cls_weight: float = 0.2,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Weighted binary segmentation and tumour-presence objective.
+
+    Returns ``(total, segmentation, classification)`` so the training loop can
+    report both task losses without recomputing them.
+    """
+    if seg_weight < 0 or cls_weight < 0 or seg_weight + cls_weight == 0:
+        raise ValueError("loss weights must be non-negative and not both zero")
+
+    cls_target = classification_target.float().reshape_as(classification_logits)
+    seg_loss = bce_dice_loss(segmentation_logits, segmentation_target)
+    cls_loss = F.binary_cross_entropy_with_logits(classification_logits, cls_target)
+    total = seg_weight * seg_loss + cls_weight * cls_loss
+    return total, seg_loss, cls_loss
+
+
 @torch.no_grad()
 def dice_coefficient(
     logits: torch.Tensor,

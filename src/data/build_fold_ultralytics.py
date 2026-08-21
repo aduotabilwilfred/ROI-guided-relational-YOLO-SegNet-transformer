@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 
@@ -17,7 +16,7 @@ from prepare_dataset import Letterbox
 
 def denoise_to_disk(
     image_path: Path, out_path: Path, window: int, poly: int, target: int
-) -> None:
+) -> Letterbox:
     """Letterbox to target size, denoise with the fold's filter, write as PNG.
 
     PNG is lossless, so it does not add compression artefacts on top of the
@@ -28,23 +27,77 @@ def denoise_to_disk(
     if image is None:
         raise OSError(f"could not read image: {image_path}")
     h, w = image.shape[:2]
-    resized = Letterbox.build(h, w, target).apply_image(image, pad_value=0)
+    transform = Letterbox.build(h, w, target)
+    resized = transform.apply_image(image, pad_value=0)
     resized = resized.astype(np.float64) / 255.0
 
     filtered = apply_sg_filter(resized, window, poly)
     out = np.rint(np.clip(filtered, 0.0, 1.0) * 255.0).astype(np.uint8)
     if not cv2.imwrite(str(out_path), out):
         raise OSError(f"could not write image: {out_path}")
+    return transform
 
 
-def place_label(label_path: Path, dest: Path, use_symlink: bool) -> None:
-    """Put the raw label at dest by copying (default) or symlinking.
+def transform_label_text(text: str, transform: Letterbox) -> str:
+    """Map YOLO segmentation polygons into the letterboxed image frame.
 
-    Copying is the default because symlinks fail silently on WSL/NTFS and other
-    Windows-backed filesystems: the link is created but dangles, Ultralytics
-    reads the label as missing, and every annotated image is silently treated
-    as background. Labels are a few hundred bytes each, so copying all of them
-    costs under a megabyte and always works.
+    Source label coordinates are normalised against the original image.  The
+    shared ``Letterbox`` first maps them to pixels using the exact scale and
+    integer padding applied to the image, after which this function normalises
+    them against the final output canvas.
+    """
+    out_h, out_w = transform.output_size
+    transformed_lines = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        parts = line.split()
+        if not parts:
+            continue
+        if len(parts) < 7 or (len(parts) - 1) % 2:
+            raise ValueError(
+                f"line {line_number}: expected class plus at least three x,y pairs"
+            )
+
+        try:
+            values = np.asarray(
+                [float(value) for value in parts[1:]], dtype=np.float64
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"line {line_number}: polygon coordinates must be numeric"
+            ) from exc
+        if not np.isfinite(values).all():
+            raise ValueError(f"line {line_number}: polygon coordinates must be finite")
+
+        source_points = values.reshape(-1, 2)
+        output_pixels = transform.apply_points(
+            [(float(x), float(y)) for x, y in source_points]
+        )
+        output_points = np.asarray(output_pixels, dtype=np.float64)
+        output_points[:, 0] = np.clip(output_points[:, 0] / out_w, 0.0, 1.0)
+        output_points[:, 1] = np.clip(output_points[:, 1] / out_h, 0.0, 1.0)
+        coordinates = " ".join(f"{value:.16g}" for value in output_points.ravel())
+        transformed_lines.append(f"{parts[0]} {coordinates}")
+
+    return "\n".join(transformed_lines) + ("\n" if transformed_lines else "")
+
+
+def _normalised_transform_is_identity(transform: Letterbox) -> bool:
+    """True when letterboxing leaves normalised coordinates unchanged."""
+    out_h, out_w = transform.output_size
+    corners = np.asarray(transform.apply_points([(0.0, 0.0), (1.0, 1.0)]))
+    corners[:, 0] /= out_w
+    corners[:, 1] /= out_h
+    return bool(np.allclose(corners, ((0.0, 0.0), (1.0, 1.0))))
+
+
+def place_label(
+    label_path: Path, dest: Path, transform: Letterbox, use_symlink: bool
+) -> None:
+    """Write a label transformed into the output image coordinate frame.
+
+    A symlink is only possible when normalised coordinates are unchanged, such
+    as for a square source image.  Non-square images must receive a materialised
+    transformed label even when ``--link`` was requested.
 
     A background image has no source label; an empty label file is written so
     Ultralytics registers it as a negative sample, not a missing one.
@@ -54,7 +107,7 @@ def place_label(label_path: Path, dest: Path, use_symlink: bool) -> None:
     if not label_path.exists():
         dest.write_text("")
         return
-    if use_symlink:
+    if use_symlink and _normalised_transform_is_identity(transform):
         try:
             dest.symlink_to(label_path.resolve())
             # Verify the link actually resolves; on NTFS it may not.
@@ -62,7 +115,7 @@ def place_label(label_path: Path, dest: Path, use_symlink: bool) -> None:
                 return
         except (OSError, NotImplementedError):
             pass
-    shutil.copyfile(label_path, dest)
+    dest.write_text(transform_label_text(label_path.read_text(), transform))
 
 
 def write_dataset_yaml(fold_dir: Path, class_names: list[str], has_test: bool) -> Path:
@@ -111,14 +164,19 @@ def build_fold(
         labels_dir.mkdir(parents=True, exist_ok=True)
 
         stem = record["image_path"].stem
-        denoise_to_disk(
+        transform = denoise_to_disk(
             record["image_path"],
             images_dir / f"{stem}.{image_format}",
             window,
             poly,
             target,
         )
-        place_label(record["label_path"], labels_dir / f"{stem}.txt", use_symlink)
+        place_label(
+            record["label_path"],
+            labels_dir / f"{stem}.txt",
+            transform,
+            use_symlink,
+        )
         counts[role] += 1
 
     yaml_path = write_dataset_yaml(fold_dir, class_names, has_test=counts["test"] > 0)
@@ -159,8 +217,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--link",
         action="store_true",
-        help="symlink labels instead of copying; only safe on "
-        "filesystems with working symlinks (not WSL/NTFS)",
+        help="symlink labels only when letterboxing leaves their normalised "
+        "coordinates unchanged; transformed labels are always written",
     )
     return parser.parse_args()
 

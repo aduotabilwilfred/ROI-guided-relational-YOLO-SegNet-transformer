@@ -184,7 +184,7 @@ def tune_relational_head(
     """
     from dataclasses import replace
 
-    from train import accumulate_fold_dice, train_one_fold
+    from .train import accumulate_fold_dice, train_one_fold
 
     space = space or default_search_space()
 
@@ -257,11 +257,9 @@ def parse_args():
 
 def main():
     import json
-    import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from utils.relational_head import HeadConfig
+    from ..utils.relational_head import HeadConfig
 
     args = parse_args()
     base_cfg = HeadConfig(image_size=args.image_size)
