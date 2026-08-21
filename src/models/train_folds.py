@@ -231,7 +231,7 @@ def main() -> int:
         if args.eval_only:
             weights[fold] = weight_path
             continue
-        print(f"\n=== training fold {fold} ===")
+        print(f"\n training fold {fold} ")
         weights[fold] = train_one_fold(
             fold_dir, args.model, args.device, args.project, extra
         )
