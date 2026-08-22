@@ -31,13 +31,13 @@ stages:
       nfiles: 1622
     - path: src/data/make_folds.py
       hash: md5
-      md5: 220bc8b84631dcd27b07ab8a97225fe5
-      size: 11239
+      md5: 5e399436b597828e8d4b6b04a6ca9b6a
+      size: 10010
       isexec: true
     - path: src/data/prepare_dataset.py
       hash: md5
-      md5: cb4732233bb8143f4e029e9602b30f7d
-      size: 39056
+      md5: c3f1543f53923207bf149fbf3a53c3bf
+      size: 35280
       isexec: true
     outs:
     - path: outputs/folds/cv_manifest.csv
@@ -62,18 +62,18 @@ stages:
       isexec: true
     - path: src/data/fold_calibration.py
       hash: md5
-      md5: 94a55e13134a8efb11a0464247a29886
-      size: 6085
+      md5: a54b68a2c7c2e89f38c0fca35066f15c
+      size: 5200
       isexec: true
     - path: src/data/osgdf_preprocessing.py
       hash: md5
-      md5: 61b7bec1408c2629e99e73043bbd3793
-      size: 37014
+      md5: ab127c6a33fc2c212e6b43ee384372fb
+      size: 32131
       isexec: true
     - path: src/data/prepare_dataset.py
       hash: md5
-      md5: cb4732233bb8143f4e029e9602b30f7d
-      size: 39056
+      md5: c3f1543f53923207bf149fbf3a53c3bf
+      size: 35280
       isexec: true
     outs:
     - path: outputs/folds/fold_params.json
@@ -81,3 +81,45 @@ stages:
       md5: f8f771e4cf15f58a62d3e0e5aae1ffc2
       size: 1091
       isexec: true
+  build_fold_ultralytics:
+    cmd: python src/data/build_fold_ultralytics.py --manifest
+      outputs/folds/cv_manifest.csv --fold-params outputs/folds/fold_params.json
+      --output-dir outputs/ultralytics_folds --target-size 512 --class-names
+      cancer
+    deps:
+    - path: data/raw/actual_dataset
+      hash: md5
+      md5: b104f56072fa7b946c33130af46da51c.dir
+      size: 905040081
+      nfiles: 1622
+    - path: outputs/folds/cv_manifest.csv
+      hash: md5
+      md5: 045abbeca86f6f57bdbb93aee015196f
+      size: 164405
+      isexec: true
+    - path: outputs/folds/fold_params.json
+      hash: md5
+      md5: f8f771e4cf15f58a62d3e0e5aae1ffc2
+      size: 1091
+      isexec: true
+    - path: src/data/build_fold_ultralytics.py
+      hash: md5
+      md5: f227272b081cffd3bba930f5d42c5c39
+      size: 7212
+      isexec: true
+    - path: src/data/osgdf_preprocessing.py
+      hash: md5
+      md5: ab127c6a33fc2c212e6b43ee384372fb
+      size: 32131
+      isexec: true
+    - path: src/data/prepare_dataset.py
+      hash: md5
+      md5: c3f1543f53923207bf149fbf3a53c3bf
+      size: 35280
+      isexec: true
+    outs:
+    - path: outputs/ultralytics_folds
+      hash: md5
+      md5: e5514e8f7fb154d9ae223db2b2f342c8.dir
+      size: 327187920
+      nfiles: 8095
