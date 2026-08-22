@@ -195,6 +195,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="", help="'' auto, 'cpu', '0', '0,1' etc.")
     parser.add_argument("--imgsz", type=int, default=512)
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="dataloader workers; set 0 on Windows if you hit "
+        "'paging file too small' (WinError 1455)",
+    )
+    parser.add_argument(
         "--epochs",
         type=int,
         default=None,
@@ -221,6 +228,8 @@ def main() -> int:
     extra = {"imgsz": args.imgsz}
     if args.epochs is not None:
         extra["epochs"] = args.epochs
+    if args.workers is not None:
+        extra["workers"] = args.workers
 
     folds = range(n_folds) if args.only_fold < 0 else [args.only_fold]
     weights: dict[int, Path] = {}
