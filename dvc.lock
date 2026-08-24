@@ -21,14 +21,14 @@ stages:
       size: 68348024
       nfiles: 2428
   make_folds:
-    cmd: python src/data/make_folds.py --data-dir data/raw/actual_dataset
-      --output outputs/folds/cv_manifest.csv --seed 42
+    cmd: python src/data/make_folds.py --data-dir data/raw/BTXRD_yolo --output
+      outputs/folds/cv_manifest.csv --seed 42
     deps:
-    - path: data/raw/actual_dataset
+    - path: data/raw/BTXRD_yolo
       hash: md5
-      md5: b104f56072fa7b946c33130af46da51c.dir
-      size: 905040081
-      nfiles: 1622
+      md5: dac499ff189964e5f604aa66f5cbe87a.dir
+      size: 892824723
+      nfiles: 7453
     - path: src/data/make_folds.py
       hash: md5
       md5: 5e399436b597828e8d4b6b04a6ca9b6a
@@ -39,16 +39,19 @@ stages:
       md5: c3f1543f53923207bf149fbf3a53c3bf
       size: 35280
       isexec: true
+    params:
+      params.yaml:
+        dataset: BTXRD_yolo
     outs:
     - path: outputs/folds/cv_manifest.csv
       hash: md5
-      md5: 045abbeca86f6f57bdbb93aee015196f
-      size: 164405
+      md5: 09e629cdcbe2cfc676539fa2e86e25aa
+      size: 432156
       isexec: true
     - path: outputs/folds/cv_manifest.summary.json
       hash: md5
-      md5: 8100871738ddb7bbe1246dc527089e73
-      size: 766
+      md5: ab46be712ca54838fe1bfea500c6d943
+      size: 779
       isexec: true
   fold_calibration:
     cmd: python src/data/fold_calibration.py --manifest
@@ -57,8 +60,8 @@ stages:
     deps:
     - path: outputs/folds/cv_manifest.csv
       hash: md5
-      md5: 045abbeca86f6f57bdbb93aee015196f
-      size: 164405
+      md5: 09e629cdcbe2cfc676539fa2e86e25aa
+      size: 432156
       isexec: true
     - path: src/data/fold_calibration.py
       hash: md5
@@ -78,8 +81,8 @@ stages:
     outs:
     - path: outputs/folds/fold_params.json
       hash: md5
-      md5: f8f771e4cf15f58a62d3e0e5aae1ffc2
-      size: 1091
+      md5: 51ee3d4cc74166b92785e65b42f45f40
+      size: 1097
       isexec: true
   build_fold_ultralytics:
     cmd: python src/data/build_fold_ultralytics.py --manifest
@@ -87,20 +90,20 @@ stages:
       --output-dir outputs/ultralytics_folds --target-size 512 --class-names
       cancer
     deps:
-    - path: data/raw/actual_dataset
+    - path: data/raw/BTXRD_yolo
       hash: md5
-      md5: b104f56072fa7b946c33130af46da51c.dir
-      size: 905040081
-      nfiles: 1622
+      md5: dac499ff189964e5f604aa66f5cbe87a.dir
+      size: 892824723
+      nfiles: 7453
     - path: outputs/folds/cv_manifest.csv
       hash: md5
-      md5: 045abbeca86f6f57bdbb93aee015196f
-      size: 164405
+      md5: 09e629cdcbe2cfc676539fa2e86e25aa
+      size: 432156
       isexec: true
     - path: outputs/folds/fold_params.json
       hash: md5
-      md5: f8f771e4cf15f58a62d3e0e5aae1ffc2
-      size: 1091
+      md5: 51ee3d4cc74166b92785e65b42f45f40
+      size: 1097
       isexec: true
     - path: src/data/build_fold_ultralytics.py
       hash: md5
@@ -117,9 +120,32 @@ stages:
       md5: c3f1543f53923207bf149fbf3a53c3bf
       size: 35280
       isexec: true
+    params:
+      params.yaml:
+        dataset: BTXRD_yolo
     outs:
     - path: outputs/ultralytics_folds
       hash: md5
-      md5: e5514e8f7fb154d9ae223db2b2f342c8.dir
-      size: 327187920
-      nfiles: 8095
+      md5: 18a58ab7ee5732e2c6826ea182603e80.dir
+      size: 1402369960
+      nfiles: 37255
+  prepare_btxrd:
+    cmd: python src/data/prepare_btxrd.py --data-dir data/raw/BTXRD --output-dir
+      data/raw/BTXRD_yolo
+    deps:
+    - path: data/raw/BTXRD
+      hash: md5
+      md5: 4f5510c23fd7b7d16c64766d1821df25.dir
+      size: 903811855
+      nfiles: 5616
+    - path: src/data/prepare_btxrd.py
+      hash: md5
+      md5: 2bc373e0b1ef1b2b043829c9e35dc14d
+      size: 7157
+      isexec: true
+    outs:
+    - path: data/raw/BTXRD_yolo
+      hash: md5
+      md5: dac499ff189964e5f604aa66f5cbe87a.dir
+      size: 892824723
+      nfiles: 7453

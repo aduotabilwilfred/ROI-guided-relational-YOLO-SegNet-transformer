@@ -1,16 +1,28 @@
 stages:
-  prepare_dataset:
-    cmd: python src/data/prepare_dataset.py --data-dir data/raw/actual_dataset --output-dir data/processed/actual_dataset --target-size 512
+  prepare_btxrd:
+    cmd: python src/data/prepare_btxrd.py --data-dir data/raw/BTXRD --output-dir data/raw/BTXRD_yolo
     deps:
-      - data/raw/actual_dataset
+      - data/raw/BTXRD
+      - src/data/prepare_btxrd.py
+    outs:
+      - data/raw/BTXRD_yolo
+
+  prepare_dataset:
+    cmd: python src/data/prepare_dataset.py --data-dir data/raw/${dataset} --output-dir data/processed/${dataset} --target-size 512
+    params:
+      - dataset
+    deps:
+      - data/raw/${dataset}
       - src/data/prepare_dataset.py
     outs:
-      - data/processed/actual_dataset
+      - data/processed/${dataset}
 
   make_folds:
-    cmd: python src/data/make_folds.py --data-dir data/raw/actual_dataset --output outputs/folds/cv_manifest.csv --seed 42
+    cmd: python src/data/make_folds.py --data-dir data/raw/${dataset} --output outputs/folds/cv_manifest.csv --seed 42
+    params:
+      - dataset
     deps:
-      - data/raw/actual_dataset
+      - data/raw/${dataset}
       - src/data/make_folds.py
       - src/data/prepare_dataset.py
     outs:
@@ -29,19 +41,18 @@ stages:
 
   build_fold_ultralytics:
     cmd: python src/data/build_fold_ultralytics.py --manifest outputs/folds/cv_manifest.csv --fold-params outputs/folds/fold_params.json --output-dir outputs/ultralytics_folds --target-size 512 --class-names cancer
+    params:
+      - dataset
     deps:
       - outputs/folds/cv_manifest.csv
       - outputs/folds/fold_params.json
-      - data/raw/actual_dataset
+      - data/raw/${dataset}
       - src/data/build_fold_ultralytics.py
       - src/data/osgdf_preprocessing.py
       - src/data/prepare_dataset.py
     outs:
       - outputs/ultralytics_folds
 
-  # Stage one of the two-stage model: train the YOLOv8 detector on each fold.
-  # Produces the frozen detector weights (best.pt per fold) that the head needs.
-  # GPU-bound; run explicitly on a GPU machine.
   train_detector:
     cmd: python src/models/train_folds.py --manifest outputs/folds/cv_manifest.csv --folds-root outputs/ultralytics_folds --project runs/segment_cv --imgsz 512
     deps:
@@ -52,8 +63,6 @@ stages:
     outs:
       - runs/segment_cv
 
-  # Stage two: train the relational head on the frozen detector's features.
-  # Consumes the detector weights from train_detector. GPU-bound.
   train_head:
     cmd: python src/models/train.py --folds-root outputs/ultralytics_folds --detector-project runs/segment_cv --output runs/relational_head --epochs 50 --batch-size 8 --lr 1e-4 --image-size 512
     deps:
@@ -72,9 +81,6 @@ stages:
     outs:
       - runs/relational_head
 
-  # Optional hyperparameter tuning. Not chained into the default flow: run
-  # explicitly (dvc repro tune_fheo) only when you want to tune. Scores
-  # candidates on the val subset, on fold_0. Depends on the detector weights.
   tune_fheo:
     cmd: python src/models/fheo.py --fold-dir outputs/ultralytics_folds/fold_0 --weights runs/segment_cv/fold_0/weights/best.pt --output outputs/fheo/best_params.json --population 8 --iterations 10 --eval-epochs 10 --device cuda
     deps:
@@ -92,3 +98,14 @@ stages:
       - src/utils/rtrb.py
     outs:
       - outputs/fheo/best_params.json
+
+  validate_btxrd:
+    cmd: python src/data/validate_btxrd.py --data-dir data/raw/BTXRD_yolo --manifest outputs/folds/cv_manifest.csv --target-size 512 --sample 200
+    deps:
+      - data/raw/BTXRD_yolo
+      - outputs/folds/cv_manifest.csv
+      - src/data/validate_btxrd.py
+      - src/data/prepare_dataset.py
+      - src/data/osgdf_preprocessing.py
+    outs:
+      - outputs/folds/btxrd_validation_report.json

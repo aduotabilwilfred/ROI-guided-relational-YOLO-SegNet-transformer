@@ -8,24 +8,51 @@ the two-stage training loop, and FHEO hyperparameter tuning.
 
 ## The pipeline in order
 
-Raw dataset (809 X-ray images, one class, axis-aligned box labels) flows
-through: label-to-mask conversion, stratified folds, per-fold OSGDF calibration,
+A raw dataset (one class, per-instance polygon or box labels) flows through:
+label-to-mask conversion, stratified folds, per-fold OSGDF calibration,
 materialisation into Ultralytics format, YOLOv8 detector training, then the
 relational head trained on frozen detector features, evaluated by pooled Dice
 and image-level classification accuracy. FHEO optionally tunes hyperparameters.
 
+Two raw datasets are selectable via `params.yaml`'s `dataset` key:
+**actual_dataset** (809 images, Roboflow export, axis-aligned/OBB box labels
+only) and **BTXRD_yolo** (3725 images after exact-duplicate removal, traced
+polygon labels — see `prepare_btxrd.py` below). Everything from
+`prepare_dataset.py` onward is dataset-agnostic: both are raw YOLO-label
+roots (`data/raw/<dataset>/<split>/{images,labels}`), so switching `dataset`
+and running `dvc repro` is sufficient to retarget the whole pipeline.
+
 ## Data preparation (src/data/)
 
-**prepare_dataset.py** — Converts raw box labels into segmentation masks and
-YOLO bboxes, letterboxing every image to 512. Has an `--inspect` mode reporting
-label contents and class balance. Revealed the data is single-class, box-
-annotated, ~half background.
+**prepare_dataset.py** — Converts raw box/polygon labels into segmentation masks
+and YOLO bboxes, letterboxing every image to 512. The label parser already
+accepts polygon lines (`class x1 y1 x2 y2 ...`), not just axis-aligned boxes,
+which is what makes it dataset-agnostic. Has an `--inspect` mode reporting
+label contents and class balance.
 
-**make_folds.py** — Pools all 809 images into five folds, stratified by tumour
-presence, grouped by source image so augmented copies never straddle a fold.
-Writes a manifest CSV; copies no images. Runs on raw data, so fold assignment is
-independent of preprocessing. `cv_roles(fold)` derives the 3/1/1 train/val/test
-rotation.
+**prepare_btxrd.py** — One-off adapter, not part of the shared pipeline: reads
+BTXRD's raw `Annotations/*.json` (LabelMe) + `dataset.csv` and writes the same
+raw YOLO-label layout `prepare_dataset.py`/`make_folds.py` expect, to
+`data/raw/BTXRD_yolo`. Keeps only the traced `polygon` shapes (each annotated
+image's JSON also carries coarser `rectangle` pre-annotations of the same
+instances, which are dropped — bboxes are derived from the polygon downstream
+instead, same as for actual_dataset's own OBB labels). BTXRD has no
+patient/case ID; hashing found 21 images filed under two different
+`image_id`s each, which are collapsed to one copy here so no leakage-relevant
+duplicate reaches fold assignment. Also writes `metadata.csv` (age, gender,
+center, malignant/benign) alongside the labels, for reporting only — nothing
+downstream reads it.
+
+**validate_btxrd.py** — Re-derives masks/bboxes from the converted labels on a
+sample, writes overlay PNGs (`reports/figures/btxrd_yolo_overlay_*.png`),
+smoke-tests OSGDF on BTXRD's image sizes, and checks the fold manifest for
+any source split across folds.
+
+**make_folds.py** — Pools all images of the selected dataset into five folds,
+stratified by tumour presence, grouped by source image so augmented/duplicate
+copies never straddle a fold. Writes a manifest CSV; copies no images. Runs on
+raw data, so fold assignment is independent of preprocessing. `cv_roles(fold)`
+derives the 3/1/1 train/val/test rotation.
 
 ## Preprocessing, OSGDF (src/data/ and src/utils/)
 
@@ -123,6 +150,12 @@ improving on them for this reconstruction.
 **dvc.yaml** — Wires the data stages (prepare, folds, calibration, ultralytics
 build) plus detector and head training into a reproducible pipeline. The head-
 training stage depends on the detector weights and all head component modules.
+`prepare_btxrd` and `validate_btxrd` are unchained (like `tune_fheo`): run
+explicitly, not part of the default `dvc repro`.
+
+**params.yaml** — Currently one key, `dataset` (`actual_dataset` or
+`BTXRD_yolo`), interpolated into `prepare_dataset`/`make_folds`/
+`build_fold_ultralytics`'s `--data-dir`.
 
 **paper_reference.md** — Paper summary, reported results, and data gaps.
 **model_decisions.md** — The reconstruction decisions (ROI soft mask, f_m/f_w
@@ -132,7 +165,11 @@ partition, BiLRA placement, FHEO approach) and how each was resolved.
 
 ## Two caveats on every result we get
 
-Masks are box-derived rectangles, so Dice measures box agreement, not tumour-
-boundary delineation. The dataset has one class, so classification is binary
-tumour-presence derived from the segmentation, not the paper's normal/benign/
-malignant.
+On **actual_dataset**, masks are box-derived rectangles, so Dice measures box
+agreement, not tumour-boundary delineation. On **BTXRD_yolo**, masks are traced
+polygon outlines, so Dice there does measure boundary agreement — the two
+numbers are not directly comparable across datasets. Both datasets are
+single-class in the fed-in label, so classification stays binary tumour-
+presence derived from the segmentation, not the paper's normal/benign/
+malignant (BTXRD's malignant/benign flags are carried in `metadata.csv` for
+reporting but are not used for stratification or as a model target).
