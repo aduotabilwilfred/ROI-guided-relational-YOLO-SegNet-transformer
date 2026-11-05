@@ -1,8 +1,8 @@
 stages:
-  prepare_btxrd:
-    cmd: python src/data/prepare_btxrd.py --data-dir data/raw/BTXRD --output-dir data/raw/BTXRD_yolo
+  prepare_raw:
+    cmd: python src/data/prepare_btxrd.py --data-dir data/raw/actual_dataset --output-dir data/raw/BTXRD_yolo
     deps:
-      - data/raw/BTXRD
+      - data/raw/actual_dataset
       - src/data/prepare_btxrd.py
     outs:
       - data/raw/BTXRD_yolo
@@ -53,34 +53,26 @@ stages:
     outs:
       - outputs/ultralytics_folds
 
-  train_detector:
-    cmd: python src/models/train_folds.py --manifest outputs/folds/cv_manifest.csv --folds-root outputs/ultralytics_folds --project runs/segment_cv --imgsz 512
-    deps:
-      - outputs/ultralytics_folds
-      - outputs/folds/cv_manifest.csv
-      - src/models/train_folds.py
-      - src/data/make_folds.py
-    outs:
-      - runs/segment_cv
 
-  train_head:
-    cmd: python src/models/train.py --folds-root outputs/ultralytics_folds --detector-project runs/segment_cv --output runs/relational_head --epochs 50 --batch-size 8 --lr 1e-4 --image-size 512
+  train_yoloseg:
+    cmd: python src/models/train_yoloseg.py --folds-root outputs/ultralytics_folds --output runs/yoloseg_relational --epochs 50 --batch-size 8 --lr 1e-4 --image-size 512
     deps:
       - outputs/ultralytics_folds
-      - runs/segment_cv
-      - src/models/train.py
-      - src/models/train_handoff.py
-      - src/data/make_folds.py
+      - src/models/train_yoloseg.py
+      - src/models/yoloseg_relational.py
+      - src/models/yolo_detection_loss.py
       - src/utils/losses.py
       - src/utils/allmlp_decoder.py
       - src/utils/bilra_attention.py
-      - src/utils/efficient_attention.py
-      - src/utils/relational_head.py
       - src/utils/roi_partition.py
       - src/utils/rtrb.py
     outs:
-      - runs/relational_head
+      - runs/yoloseg_relational
 
+
+# Optional hyperparameter tuning. Not chained into the default flow: run
+  # explicitly (dvc repro tune_fheo) only when you want to tune. Scores
+  # candidates on the val subset, on fold_0. Depends on the detector weights.
   tune_fheo:
     cmd: python src/models/fheo.py --fold-dir outputs/ultralytics_folds/fold_0 --weights runs/segment_cv/fold_0/weights/best.pt --output outputs/fheo/best_params.json --population 8 --iterations 10 --eval-epochs 10 --device cuda
     deps:
@@ -89,23 +81,14 @@ stages:
       - src/models/fheo.py
       - src/models/train.py
       - src/models/train_handoff.py
+      - src/models/model.py
       - src/utils/losses.py
       - src/utils/allmlp_decoder.py
       - src/utils/bilra_attention.py
       - src/utils/efficient_attention.py
       - src/utils/relational_head.py
       - src/utils/roi_partition.py
+      - src/utils/roi_crop.py
       - src/utils/rtrb.py
     outs:
       - outputs/fheo/best_params.json
-
-  validate_btxrd:
-    cmd: python src/data/validate_btxrd.py --data-dir data/raw/BTXRD_yolo --manifest outputs/folds/cv_manifest.csv --target-size 512 --sample 200
-    deps:
-      - data/raw/BTXRD_yolo
-      - outputs/folds/cv_manifest.csv
-      - src/data/validate_btxrd.py
-      - src/data/prepare_dataset.py
-      - src/data/osgdf_preprocessing.py
-    outs:
-      - outputs/folds/btxrd_validation_report.json

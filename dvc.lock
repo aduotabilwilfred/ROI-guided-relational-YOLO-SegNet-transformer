@@ -1,7 +1,7 @@
 schema: '2.0'
 stages:
   prepare_dataset:
-    cmd: python src/data/prepare_dataset.py --data-dir data/raw/actual_dataset
+    cmd: python src/data/prepare_dataset.py --data-dir data/raw/actual_dataset 
       --output-dir data/processed/actual_dataset --target-size 512
     deps:
     - path: data/raw/actual_dataset
@@ -21,73 +21,64 @@ stages:
       size: 68348024
       nfiles: 2428
   make_folds:
-    cmd: python src/data/make_folds.py --data-dir data/raw/BTXRD_yolo --output
+    cmd: python src/data/make_folds.py --data-dir data/raw/BTXRD_yolo --output 
       outputs/folds/cv_manifest.csv --seed 42
     deps:
     - path: data/raw/BTXRD_yolo
       hash: md5
-      md5: dac499ff189964e5f604aa66f5cbe87a.dir
-      size: 892824723
+      md5: a4a60ce94cd0f57b83de169786acb428.dir
+      size: 892827129
       nfiles: 7453
     - path: src/data/make_folds.py
       hash: md5
       md5: 5e399436b597828e8d4b6b04a6ca9b6a
       size: 10010
-      isexec: true
     - path: src/data/prepare_dataset.py
       hash: md5
-      md5: c3f1543f53923207bf149fbf3a53c3bf
-      size: 35280
-      isexec: true
+      md5: 61875a5d014f97b5c316874342f1f28e
+      size: 36255
     params:
       params.yaml:
         dataset: BTXRD_yolo
     outs:
     - path: outputs/folds/cv_manifest.csv
       hash: md5
-      md5: 09e629cdcbe2cfc676539fa2e86e25aa
+      md5: 168c9eebac33b4f68381b2e1d54129b8
       size: 432156
-      isexec: true
     - path: outputs/folds/cv_manifest.summary.json
       hash: md5
-      md5: ab46be712ca54838fe1bfea500c6d943
-      size: 779
-      isexec: true
+      md5: 7d9e71c7635a85513dcacf06f73ac935
+      size: 820
   fold_calibration:
-    cmd: python src/data/fold_calibration.py --manifest
-      outputs/folds/cv_manifest.csv --output outputs/folds/fold_params.json
+    cmd: python src/data/fold_calibration.py --manifest 
+      outputs/folds/cv_manifest.csv --output outputs/folds/fold_params.json 
       --target-size 512 --sample-size 40 --agents 25 --iters 60
     deps:
     - path: outputs/folds/cv_manifest.csv
       hash: md5
-      md5: 09e629cdcbe2cfc676539fa2e86e25aa
+      md5: 168c9eebac33b4f68381b2e1d54129b8
       size: 432156
-      isexec: true
     - path: src/data/fold_calibration.py
       hash: md5
       md5: a54b68a2c7c2e89f38c0fca35066f15c
       size: 5200
-      isexec: true
     - path: src/data/osgdf_preprocessing.py
       hash: md5
-      md5: ab127c6a33fc2c212e6b43ee384372fb
-      size: 32131
-      isexec: true
+      md5: 0fb4ea4a127388fbb7338026d3697e42
+      size: 32991
     - path: src/data/prepare_dataset.py
       hash: md5
-      md5: c3f1543f53923207bf149fbf3a53c3bf
-      size: 35280
-      isexec: true
+      md5: 61875a5d014f97b5c316874342f1f28e
+      size: 36255
     outs:
     - path: outputs/folds/fold_params.json
       hash: md5
-      md5: 51ee3d4cc74166b92785e65b42f45f40
-      size: 1097
-      isexec: true
+      md5: ce27915231d20b0f2719d37485eec886
+      size: 1147
   build_fold_ultralytics:
-    cmd: python src/data/build_fold_ultralytics.py --manifest
+    cmd: python src/data/build_fold_ultralytics.py --manifest 
       outputs/folds/cv_manifest.csv --fold-params outputs/folds/fold_params.json
-      --output-dir outputs/ultralytics_folds --target-size 512 --class-names
+      --output-dir outputs/ultralytics_folds --target-size 512 --class-names 
       cancer
     deps:
     - path: data/raw/BTXRD_yolo
@@ -148,4 +139,23 @@ stages:
       hash: md5
       md5: dac499ff189964e5f604aa66f5cbe87a.dir
       size: 892824723
+      nfiles: 7453
+  prepare_raw:
+    cmd: python src/data/prepare_btxrd.py --data-dir data/raw/actual_dataset 
+      --output-dir data/raw/BTXRD_yolo
+    deps:
+    - path: data/raw/actual_dataset
+      hash: md5
+      md5: 4f5510c23fd7b7d16c64766d1821df25.dir
+      size: 903811855
+      nfiles: 5616
+    - path: src/data/prepare_btxrd.py
+      hash: md5
+      md5: 1a92d348eac456daebdc9d4a0665382a
+      size: 7403
+    outs:
+    - path: data/raw/BTXRD_yolo
+      hash: md5
+      md5: a4a60ce94cd0f57b83de169786acb428.dir
+      size: 892827129
       nfiles: 7453
