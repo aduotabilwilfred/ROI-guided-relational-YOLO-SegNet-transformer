@@ -119,7 +119,6 @@ class FoldDataset(Dataset):
     def __getitem__(self, index: int) -> dict:
         path = self.paths[index]
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
-        img = cv2.resize(img, (self.size, self.size))
         rgb = np.repeat(img[None], 3, axis=0).astype(np.float32) / 255.0
 
         mask, gt_box, has_box = self._read_label(self.labels_dir / f"{path.stem}.txt")
