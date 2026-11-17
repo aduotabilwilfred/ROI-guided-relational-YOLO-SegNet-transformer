@@ -35,8 +35,7 @@ Output has 2 * embed_dim channels (Eq. 20 concatenates two embed_dim heads).
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from torch import nn
 
 
 class RelationalTransformerBlock(nn.Module):
@@ -55,16 +54,22 @@ class RelationalTransformerBlock(nn.Module):
     with tumour size, not image size. Returns (B, 2 * embed_dim, H, W).
     """
 
-    def __init__(self, in_channels: int, embed_dim: int = 128,
-                 num_heads: int = 8, max_roi_tokens: int = 1024):
+    def __init__(
+        self,
+        in_channels: int,
+        embed_dim: int = 128,
+        num_heads: int = 8,
+        max_roi_tokens: int = 1024,
+    ):
         super().__init__()
         if embed_dim % num_heads != 0:
             raise ValueError(
-                f"embed_dim {embed_dim} not divisible by num_heads {num_heads}")
+                f"embed_dim {embed_dim} not divisible by num_heads {num_heads}"
+            )
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         # Bounds attention cost regardless of how large the caller's ROI mask
         # is. Self-attention here is O(tokens^2); nothing upstream guarantees
         # a small mask - a mask built from an untrained or still-training box
@@ -116,11 +121,12 @@ class RelationalTransformerBlock(nn.Module):
         """Randomly subsample idx down to max_roi_tokens if it is larger."""
         if idx.numel() <= self.max_roi_tokens:
             return idx
-        perm = torch.randperm(idx.numel(), device=idx.device)[:self.max_roi_tokens]
+        perm = torch.randperm(idx.numel(), device=idx.device)[: self.max_roi_tokens]
         return idx[perm]
 
-    def forward(self, feat: torch.Tensor, m_mask: torch.Tensor,
-                w_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, feat: torch.Tensor, m_mask: torch.Tensor, w_mask: torch.Tensor
+    ) -> torch.Tensor:
         """ROI-restricted dual-head attention.
 
         feat   : (B, C, H, W) full feature map.
@@ -137,7 +143,7 @@ class RelationalTransformerBlock(nn.Module):
         dev = feat.device
 
         # Project once over the whole map; gather per-sample below.
-        q_sa = self._project_qkv(feat, self.q_sa)      # (B, N, embed)
+        q_sa = self._project_qkv(feat, self.q_sa)  # (B, N, embed)
         k_sa = self._project_qkv(feat, self.k_sa)
         v_sa = self._project_qkv(feat, self.v_sa)
         q_ca = self._project_qkv(feat, self.q_ca)
@@ -154,16 +160,16 @@ class RelationalTransformerBlock(nn.Module):
         g_ca = torch.zeros(b, n, self.embed_dim, dtype=feat.dtype, device=dev)
 
         for i in range(b):
-            m_idx = self._cap(m_flat[i].nonzero(as_tuple=True)[0])   # tumour tokens
+            m_idx = self._cap(m_flat[i].nonzero(as_tuple=True)[0])  # tumour tokens
             if m_idx.numel() == 0:
-                continue                                     # background: skip
-            w_idx = self._cap(w_flat[i].nonzero(as_tuple=True)[0])   # ring tokens
+                continue  # background: skip
+            w_idx = self._cap(w_flat[i].nonzero(as_tuple=True)[0])  # ring tokens
 
             # Self-attention over tumour tokens only.
             qs = self._heads(q_sa[i, m_idx])
             ks = self._heads(k_sa[i, m_idx])
             vs = self._heads(v_sa[i, m_idx])
-            att_sa = self._attend_tokens(qs, ks, vs)         # (heads, m, hd)
+            att_sa = self._attend_tokens(qs, ks, vs)  # (heads, m, hd)
             g_sa[i, m_idx] = att_sa.permute(1, 0, 2).reshape(-1, self.embed_dim)
 
             # Cross-attention: tumour queries, ring keys/values. If no ring
@@ -172,7 +178,7 @@ class RelationalTransformerBlock(nn.Module):
                 qc = self._heads(q_ca[i, m_idx])
                 kc = self._heads(k_ca[i, w_idx])
                 vc = self._heads(v_ca[i, w_idx])
-                att_ca = self._attend_tokens(qc, kc, vc)     # (heads, m, hd)
+                att_ca = self._attend_tokens(qc, kc, vc)  # (heads, m, hd)
                 g_ca[i, m_idx] = att_ca.permute(1, 0, 2).reshape(-1, self.embed_dim)
 
         # Scatter attended tokens back to spatial maps.
@@ -188,4 +194,4 @@ class RelationalTransformerBlock(nn.Module):
 
         # Project each head to embed_dim and concatenate over channels (Eq. 20).
         out = torch.cat([self.out_sa(f_sa), self.out_ca(f_ca)], dim=1)
-        return out                                # (B, 2 * embed_dim, H, W)
+        return out  # (B, 2 * embed_dim, H, W)

@@ -31,7 +31,6 @@ consumes them.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import torch
 
@@ -43,13 +42,15 @@ class ROIMasks:
     m_mask, w_mask: (B, 1, H, W) binary maps. has_roi: (B,) bool, False for
     samples with no detected box (all-zero masks).
     """
+
     m_mask: torch.Tensor
     w_mask: torch.Tensor
     has_roi: torch.Tensor
 
 
-def _boxes_to_mask(boxes: torch.Tensor, h: int, w: int,
-                   device: torch.device) -> torch.Tensor:
+def _boxes_to_mask(
+    boxes: torch.Tensor, h: int, w: int, device: torch.device
+) -> torch.Tensor:
     """Union of axis-aligned boxes into a binary (H, W) mask.
 
     boxes: (N, 4) in normalised xyxy (x0, y0, x1, y1), values in [0, 1].
@@ -76,15 +77,17 @@ def _dilate_boxes(boxes: torch.Tensor, factor: float) -> torch.Tensor:
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     half_w = (x1 - x0) / 2 * factor
     half_h = (y1 - y0) / 2 * factor
-    dilated = torch.stack([cx - half_w, cy - half_h,
-                           cx + half_w, cy + half_h], dim=-1)
+    dilated = torch.stack([cx - half_w, cy - half_h, cx + half_w, cy + half_h], dim=-1)
     return dilated.clamp(0.0, 1.0)
 
 
-def build_roi_masks(boxes_per_image: List[torch.Tensor],
-                    feat_h: int, feat_w: int,
-                    dilation: float = 1.5,
-                    device: Optional[torch.device] = None) -> ROIMasks:
+def build_roi_masks(
+    boxes_per_image: list[torch.Tensor],
+    feat_h: int,
+    feat_w: int,
+    dilation: float = 1.5,
+    device: torch.device | None = None,
+) -> ROIMasks:
     """Build f_m and f_w masks for a batch.
 
     Parameters
@@ -96,8 +99,9 @@ def build_roi_masks(boxes_per_image: List[torch.Tensor],
 
     Returns ROIMasks with m_mask, w_mask (B, 1, H, W) and has_roi (B,).
     """
-    device = device or (boxes_per_image[0].device if boxes_per_image
-                        else torch.device("cpu"))
+    device = device or (
+        boxes_per_image[0].device if boxes_per_image else torch.device("cpu")
+    )
     b = len(boxes_per_image)
     m_masks = torch.zeros(b, 1, feat_h, feat_w, device=device)
     w_masks = torch.zeros(b, 1, feat_h, feat_w, device=device)
@@ -107,11 +111,11 @@ def build_roi_masks(boxes_per_image: List[torch.Tensor],
         boxes = boxes.to(device)
         m = _boxes_to_mask(boxes, feat_h, feat_w, device)
         if m.sum() == 0:
-            continue                      # no tumour: leave masks all-zero
+            continue  # no tumour: leave masks all-zero
         has_roi[i] = True
         dilated = _dilate_boxes(boxes, dilation)
         context = _boxes_to_mask(dilated, feat_h, feat_w, device)
-        ring = torch.clamp(context - m, min=0.0)   # dilated minus box = ring
+        ring = torch.clamp(context - m, min=0.0)  # dilated minus box = ring
         m_masks[i, 0] = m
         w_masks[i, 0] = ring
 

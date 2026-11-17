@@ -7,8 +7,9 @@ import torch
 import torch.nn.functional as F
 
 
-def dice_loss(logits: torch.Tensor, target: torch.Tensor,
-              eps: float = 1e-6) -> torch.Tensor:
+def dice_loss(
+    logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
     """Soft Dice loss for binary segmentation.
 
     logits: (B, 1, H, W) raw scores. target: (B, 1, H, W) or (B, H, W) in {0,1}.
@@ -23,8 +24,9 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor,
     return 1 - dice.mean()
 
 
-def bce_dice_loss(logits: torch.Tensor, target: torch.Tensor,
-                  bce_weight: float = 0.5) -> torch.Tensor:
+def bce_dice_loss(
+    logits: torch.Tensor, target: torch.Tensor, bce_weight: float = 0.5
+) -> torch.Tensor:
     """Combined BCE + Dice, the paper's segmentation objective."""
     if target.dim() == 3:
         target = target.unsqueeze(1)
@@ -34,8 +36,12 @@ def bce_dice_loss(logits: torch.Tensor, target: torch.Tensor,
 
 
 @torch.no_grad()
-def dice_coefficient(logits: torch.Tensor, target: torch.Tensor,
-                     threshold: float = 0.5, eps: float = 1e-6) -> float:
+def dice_coefficient(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    threshold: float = 0.5,
+    eps: float = 1e-6,
+) -> float:
     """Hard Dice overlap after thresholding, for evaluation."""
     if target.dim() == 3:
         target = target.unsqueeze(1)

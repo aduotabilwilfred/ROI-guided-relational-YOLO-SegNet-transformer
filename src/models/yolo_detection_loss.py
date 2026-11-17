@@ -1,7 +1,7 @@
 import math
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class YOLODetectionLoss(nn.Module):
@@ -11,7 +11,7 @@ class YOLODetectionLoss(nn.Module):
         self.stride = stride
 
         # BCE Loss with Logits handles raw network outputs without needing manual Sigmoids
-        self.bce_cls = nn.BCEWithLogitsLoss(reduction='mean')
+        self.bce_cls = nn.BCEWithLogitsLoss(reduction="mean")
 
     def _get_iou_loss(self, pred_boxes, gt_boxes, eps: float = 1e-7):
         """
@@ -57,7 +57,7 @@ class YOLODetectionLoss(nn.Module):
         # Aspect-ratio consistency term (the C in CIoU).
         pw, ph = (px2 - px1).clamp(min=eps), (py2 - py1).clamp(min=eps)
         gw, gh = (gx2 - gx1).clamp(min=eps), (gy2 - gy1).clamp(min=eps)
-        v = (4 / math.pi ** 2) * (torch.atan(gw / gh) - torch.atan(pw / ph)) ** 2
+        v = (4 / math.pi**2) * (torch.atan(gw / gh) - torch.atan(pw / ph)) ** 2
         with torch.no_grad():
             alpha = v / (1 - iou + v + eps)
 
@@ -73,8 +73,8 @@ class YOLODetectionLoss(nn.Module):
                  - 'gt_labels': Tensor of shape [B, 1] -> 1.0 if tumor is present, 0.0 for healthy bone
         """
         out_high, out_mid, out_low = head_outputs
-        gt_boxes = targets['gt_boxes']
-        gt_labels = targets['gt_labels']
+        gt_boxes = targets["gt_boxes"]
+        gt_labels = targets["gt_labels"]
 
         # Plain-float accumulators here mean total_bbox_loss stays a Python
         # float (no .item(), no device, breaks any caller treating the return
@@ -88,7 +88,7 @@ class YOLODetectionLoss(nn.Module):
 
         # We loop over the three feature map scales (High, Mid, Low resolution heads)
         for head_tensor in [out_high, out_mid, out_low]:
-            B = head_tensor.shape[0]   # C, H_grid, W_grid unused past the reshape
+            B = head_tensor.shape[0]  # C, H_grid, W_grid unused past the reshape
 
             # Reshape tensor to align predictions per grid cell: [B, H_grid * W_grid, 5]
             head_flat = head_tensor.permute(0, 2, 3, 1).contiguous().view(B, -1, 5)
@@ -99,7 +99,9 @@ class YOLODetectionLoss(nn.Module):
 
             # --- 1. COMPUTE CLASSIFICATION LOSS (BCE.loss) ---
             # Broaden target labels to match the spatial dimensions of the grid cells
-            target_cls = gt_labels.unsqueeze(1).repeat(1, head_flat.shape[1], self.num_classes)
+            target_cls = gt_labels.unsqueeze(1).repeat(
+                1, head_flat.shape[1], self.num_classes
+            )
             loss_cls = self.bce_cls(pred_cls_logits, target_cls)
             total_cls_loss += loss_cls
 
@@ -112,7 +114,12 @@ class YOLODetectionLoss(nn.Module):
                 pos_pred_boxes = pred_boxes_raw[pos_batch_indices].view(-1, 4)
 
                 # Expand ground truth boxes to calculate metrics against matching grid spaces
-                pos_gt_boxes = gt_boxes[pos_batch_indices].unsqueeze(1).repeat(1, head_flat.shape[1], 1).view(-1, 4)
+                pos_gt_boxes = (
+                    gt_boxes[pos_batch_indices]
+                    .unsqueeze(1)
+                    .repeat(1, head_flat.shape[1], 1)
+                    .view(-1, 4)
+                )
 
                 # DetectionHead (yoloseg_relational.py) now decodes its own box
                 # branch (center + size -> corners) before returning, so

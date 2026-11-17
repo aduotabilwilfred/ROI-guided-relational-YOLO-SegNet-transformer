@@ -1,7 +1,7 @@
 schema: '2.0'
 stages:
   prepare_dataset:
-    cmd: python src/data/prepare_dataset.py --data-dir data/raw/actual_dataset 
+    cmd: python src/data/prepare_dataset.py --data-dir data/raw/actual_dataset
       --output-dir data/processed/actual_dataset --target-size 512
     deps:
     - path: data/raw/actual_dataset
@@ -21,7 +21,7 @@ stages:
       size: 68348024
       nfiles: 2428
   make_folds:
-    cmd: python src/data/make_folds.py --data-dir data/raw/BTXRD_yolo --output 
+    cmd: python src/data/make_folds.py --data-dir data/raw/BTXRD_yolo --output
       outputs/folds/cv_manifest.csv --seed 42
     deps:
     - path: data/raw/BTXRD_yolo
@@ -50,8 +50,8 @@ stages:
       md5: 7d9e71c7635a85513dcacf06f73ac935
       size: 820
   fold_calibration:
-    cmd: python src/data/fold_calibration.py --manifest 
-      outputs/folds/cv_manifest.csv --output outputs/folds/fold_params.json 
+    cmd: python src/data/fold_calibration.py --manifest
+      outputs/folds/cv_manifest.csv --output outputs/folds/fold_params.json
       --target-size 512 --sample-size 40 --agents 25 --iters 60
     deps:
     - path: outputs/folds/cv_manifest.csv
@@ -76,9 +76,9 @@ stages:
       md5: ce27915231d20b0f2719d37485eec886
       size: 1147
   build_fold_ultralytics:
-    cmd: python src/data/build_fold_ultralytics.py --manifest 
+    cmd: python src/data/build_fold_ultralytics.py --manifest
       outputs/folds/cv_manifest.csv --fold-params outputs/folds/fold_params.json
-      --output-dir outputs/ultralytics_folds --target-size 512 --class-names 
+      --output-dir outputs/ultralytics_folds --target-size 512 --class-names
       cancer
     deps:
     - path: data/raw/BTXRD_yolo
@@ -141,7 +141,7 @@ stages:
       size: 892824723
       nfiles: 7453
   prepare_raw:
-    cmd: python src/data/prepare_btxrd.py --data-dir data/raw/actual_dataset 
+    cmd: python src/data/prepare_btxrd.py --data-dir data/raw/actual_dataset
       --output-dir data/raw/BTXRD_yolo
     deps:
     - path: data/raw/actual_dataset

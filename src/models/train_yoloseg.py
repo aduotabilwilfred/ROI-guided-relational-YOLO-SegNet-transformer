@@ -35,23 +35,24 @@ SRC_DIR = Path(__file__).resolve().parents[1]
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from models.yolo_detection_loss import YOLODetectionLoss  # noqa: E402
-from models.yoloseg_relational import YOLOSegNet  # noqa: E402
-from utils.losses import bce_dice_loss  # noqa: E402
+from models.yolo_detection_loss import YOLODetectionLoss
+from models.yoloseg_relational import YOLOSegNet
+from utils.losses import bce_dice_loss
 
-PRESENCE_MIN_PIXELS = 20   # mask pixels above which an image counts as "tumour"
+PRESENCE_MIN_PIXELS = 20  # mask pixels above which an image counts as "tumour"
 
 
 class MLflowRun:
-
-    def __init__(self, enabled: bool, experiment_name: str, run_name: str,
-                tracking_uri: str = ""):
+    def __init__(
+        self, enabled: bool, experiment_name: str, run_name: str, tracking_uri: str = ""
+    ):
         self.enabled = enabled
         self.mlflow = None
         if not enabled:
             return
         try:
             import mlflow
+
             self.mlflow = mlflow
             mlflow.set_tracking_uri(tracking_uri or "sqlite:///mlflow.db")
             mlflow.set_experiment(experiment_name)
@@ -84,13 +85,13 @@ class MLflowRun:
 
 
 class FoldDataset(Dataset):
-
     def __init__(self, fold_dir: Path, role: str, image_size: int = 512):
         self.images_dir = fold_dir / role / "images"
         self.labels_dir = fold_dir / role / "labels"
         self.size = image_size
-        self.paths = sorted(self.images_dir.glob("*.png")) + \
-            sorted(self.images_dir.glob("*.jpg"))
+        self.paths = sorted(self.images_dir.glob("*.png")) + sorted(
+            self.images_dir.glob("*.jpg")
+        )
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -121,8 +122,7 @@ class FoldDataset(Dataset):
         img = cv2.resize(img, (self.size, self.size))
         rgb = np.repeat(img[None], 3, axis=0).astype(np.float32) / 255.0
 
-        mask, gt_box, has_box = self._read_label(
-            self.labels_dir / f"{path.stem}.txt")
+        mask, gt_box, has_box = self._read_label(self.labels_dir / f"{path.stem}.txt")
         return {
             "image": torch.from_numpy(rgb),
             "mask": torch.from_numpy(mask).float(),
@@ -135,21 +135,35 @@ def collate(batch: list[dict]) -> dict:
     return {k: torch.stack([b[k] for b in batch]) for k in batch[0]}
 
 
-def image_level_correct(pred_mask: torch.Tensor, gt_mask: torch.Tensor,
-                        threshold: int = PRESENCE_MIN_PIXELS) -> int:
+def image_level_correct(
+    pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: int = PRESENCE_MIN_PIXELS
+) -> int:
     """Count images where predicted tumour-presence matches the ground truth."""
     pred_area = pred_mask.flatten(1).sum(dim=1)
     gt_area = gt_mask.flatten(1).sum(dim=1)
     return int(((pred_area > threshold) == (gt_area > 0)).sum().item())
 
 
-def train_one_fold(fold_dir: Path, model: YOLOSegNet, det_loss_fn: YOLODetectionLoss,
-                   device: str, epochs: int, batch_size: int, lr: float,
-                   seg_weight: float, det_weight: float,
-                   mlrun: MLflowRun | None, fold_idx: int) -> YOLOSegNet:
+def train_one_fold(
+    fold_dir: Path,
+    model: YOLOSegNet,
+    det_loss_fn: YOLODetectionLoss,
+    device: str,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    seg_weight: float,
+    det_weight: float,
+    mlrun: MLflowRun | None,
+    fold_idx: int,
+) -> YOLOSegNet:
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
-    loader = DataLoader(FoldDataset(fold_dir, "train", model.image_size),
-                        batch_size=batch_size, shuffle=True, collate_fn=collate)
+    loader = DataLoader(
+        FoldDataset(fold_dir, "train", model.image_size),
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=collate,
+    )
 
     model.train()
     for epoch in range(epochs):
@@ -158,14 +172,17 @@ def train_one_fold(fold_dir: Path, model: YOLOSegNet, det_loss_fn: YOLODetection
         for batch in loader:
             images = batch["image"].to(device)
             gt_mask = batch["mask"].unsqueeze(1).to(device)
-            targets = {"gt_boxes": batch["gt_box"].to(device),
-                      "gt_labels": batch["gt_label"].to(device)}
+            targets = {
+                "gt_boxes": batch["gt_box"].to(device),
+                "gt_labels": batch["gt_label"].to(device),
+            }
 
             opt.zero_grad()
             mask_logits, out_high, out_mid, out_low = model(images)
             seg_loss = bce_dice_loss(mask_logits, gt_mask)
             det_joint, det_bbox, det_cls = det_loss_fn(
-                (out_high, out_mid, out_low), targets)
+                (out_high, out_mid, out_low), targets
+            )
             loss = seg_weight * seg_loss + det_weight * det_joint
             loss.backward()
             opt.step()
@@ -181,25 +198,40 @@ def train_one_fold(fold_dir: Path, model: YOLOSegNet, det_loss_fn: YOLODetection
 
         n = len(loader)
         acc = correct / total if total > 0 else 0.0
-        print(f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | "
-              f"loss {running_total/n:.4f} | seg {running_seg/n:.4f} | "
-              f"bbox {running_bbox/n:.4f} | cls {running_cls/n:.4f} | acc {acc:.4f}")
+        print(
+            f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | "
+            f"loss {running_total / n:.4f} | seg {running_seg / n:.4f} | "
+            f"bbox {running_bbox / n:.4f} | cls {running_cls / n:.4f} | acc {acc:.4f}"
+        )
         if mlrun is not None:
-            mlrun.log_metric(f"fold_{fold_idx}_train_loss", running_total/n, step=epoch)
-            mlrun.log_metric(f"fold_{fold_idx}_train_seg_loss", running_seg/n, step=epoch)
-            mlrun.log_metric(f"fold_{fold_idx}_train_bbox_loss", running_bbox/n, step=epoch)
-            mlrun.log_metric(f"fold_{fold_idx}_train_cls_loss", running_cls/n, step=epoch)
+            mlrun.log_metric(
+                f"fold_{fold_idx}_train_loss", running_total / n, step=epoch
+            )
+            mlrun.log_metric(
+                f"fold_{fold_idx}_train_seg_loss", running_seg / n, step=epoch
+            )
+            mlrun.log_metric(
+                f"fold_{fold_idx}_train_bbox_loss", running_bbox / n, step=epoch
+            )
+            mlrun.log_metric(
+                f"fold_{fold_idx}_train_cls_loss", running_cls / n, step=epoch
+            )
             mlrun.log_metric(f"fold_{fold_idx}_train_acc", acc, step=epoch)
     return model
 
 
 @torch.no_grad()
-def evaluate_fold(fold_dir: Path, model: YOLOSegNet, device: str, batch_size: int,
-                  role: str = "test") -> tuple[int, int, int, int, int]:
+def evaluate_fold(
+    fold_dir: Path, model: YOLOSegNet, device: str, batch_size: int, role: str = "test"
+) -> tuple[int, int, int, int, int]:
     """Return (intersection, pred_area, gt_area, correct, total) for one fold."""
     model.eval()
-    loader = DataLoader(FoldDataset(fold_dir, role, model.image_size),
-                        batch_size=batch_size, collate_fn=collate, shuffle=False)
+    loader = DataLoader(
+        FoldDataset(fold_dir, role, model.image_size),
+        batch_size=batch_size,
+        collate_fn=collate,
+        shuffle=False,
+    )
     inter = pred_area = gt_area = correct = total = 0
     for batch in loader:
         images = batch["image"].to(device)
@@ -216,9 +248,9 @@ def evaluate_fold(fold_dir: Path, model: YOLOSegNet, device: str, batch_size: in
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Train the joint Relational YOLO-SegNet (Track B).")
-    p.add_argument("--folds-root", type=Path,
-                   default=Path("outputs/ultralytics_folds"))
+        description="Train the joint Relational YOLO-SegNet (Track B)."
+    )
+    p.add_argument("--folds-root", type=Path, default=Path("outputs/ultralytics_folds"))
     p.add_argument("--output", type=Path, default=Path("runs/yoloseg_relational"))
     p.add_argument("--n-folds", type=int, default=5)
     p.add_argument("--epochs", type=int, default=50)
@@ -233,8 +265,12 @@ def parse_args() -> argparse.Namespace:
     model_args.add_argument("--dilation", type=float, default=1.5)
     model_args.add_argument("--n-regions", type=int, default=4)
     model_args.add_argument("--topk", type=int, default=4)
-    model_args.add_argument("--box-conf", type=float, default=0.5,
-                            help="confidence used to build ROI masks internally")
+    model_args.add_argument(
+        "--box-conf",
+        type=float,
+        default=0.5,
+        help="confidence used to build ROI masks internally",
+    )
     model_args.add_argument("--max-roi-tokens", type=int, default=1024)
 
     loss_args = p.add_argument_group("loss weighting")
@@ -252,15 +288,26 @@ def main() -> int:
     args = parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
 
-    mlrun = MLflowRun(not args.no_mlflow, args.mlflow_experiment,
-                      args.mlflow_run_name, args.mlflow_uri)
-    mlrun.log_params({
-        "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
-        "image_size": args.image_size, "embed_dim": args.embed_dim,
-        "num_heads": args.num_heads, "dilation": args.dilation,
-        "seg_weight": args.seg_weight, "det_weight": args.det_weight,
-        "box_conf": args.box_conf,
-    })
+    mlrun = MLflowRun(
+        not args.no_mlflow,
+        args.mlflow_experiment,
+        args.mlflow_run_name,
+        args.mlflow_uri,
+    )
+    mlrun.log_params(
+        {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "image_size": args.image_size,
+            "embed_dim": args.embed_dim,
+            "num_heads": args.num_heads,
+            "dilation": args.dilation,
+            "seg_weight": args.seg_weight,
+            "det_weight": args.det_weight,
+            "box_conf": args.box_conf,
+        }
+    )
 
     eps = 1e-7
     total_inter = total_pred = total_gt = total_correct = total_images = 0
@@ -271,20 +318,34 @@ def main() -> int:
         print(f"=== training fold {fold} (joint model) ===")
 
         model = YOLOSegNet(
-            image_size=args.image_size, embed_dim=args.embed_dim,
-            num_heads=args.num_heads, dilation=args.dilation,
-            n_regions=args.n_regions, topk=args.topk,
-            box_conf=args.box_conf).to(args.device)
+            image_size=args.image_size,
+            embed_dim=args.embed_dim,
+            num_heads=args.num_heads,
+            dilation=args.dilation,
+            n_regions=args.n_regions,
+            topk=args.topk,
+            box_conf=args.box_conf,
+        ).to(args.device)
         det_loss_fn = YOLODetectionLoss(num_classes=1)
 
         model = train_one_fold(
-            fold_dir, model, det_loss_fn, args.device, args.epochs,
-            args.batch_size, args.lr, args.seg_weight, args.det_weight,
-            mlrun, fold)
+            fold_dir,
+            model,
+            det_loss_fn,
+            args.device,
+            args.epochs,
+            args.batch_size,
+            args.lr,
+            args.seg_weight,
+            args.det_weight,
+            mlrun,
+            fold,
+        )
         torch.save(model.state_dict(), args.output / f"model_fold{fold}.pth")
 
         inter, pred, gt, correct, total = evaluate_fold(
-            fold_dir, model, args.device, args.batch_size)
+            fold_dir, model, args.device, args.batch_size
+        )
         fold_dice = (2 * inter + eps) / (pred + gt + eps)
         fold_acc = correct / total if total > 0 else 0.0
         per_fold[fold] = {"dice": fold_dice, "acc": fold_acc}
@@ -304,8 +365,11 @@ def main() -> int:
 
     pooled_dice = (2 * total_inter + eps) / (total_pred + total_gt + eps)
     pooled_acc = total_correct / total_images if total_images > 0 else 0.0
-    report = {"pooled_dice": pooled_dice, "pooled_acc": pooled_acc,
-             "per_fold": per_fold}
+    report = {
+        "pooled_dice": pooled_dice,
+        "pooled_acc": pooled_acc,
+        "per_fold": per_fold,
+    }
     (args.output / "pooled_metrics.json").write_text(json.dumps(report, indent=2))
     mlrun.log_metric("pooled_dice", pooled_dice)
     mlrun.log_metric("pooled_acc", pooled_acc)
