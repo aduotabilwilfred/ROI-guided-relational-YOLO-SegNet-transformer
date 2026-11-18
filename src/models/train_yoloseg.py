@@ -7,8 +7,10 @@ together from a single combined loss. There is no frozen component and no
 detector-handoff step.
 
 Per batch: the model's own detection heads (out_high/out_mid/out_low) are
-supervised by YOLODetectionLoss (box CIoU + classification), and its mask
-output is supervised by bce_dice_loss, the paper's segmentation objective.
+supervised by YOLODetectionLoss (box CIoU + per-cell classification), its mask
+output by bce_dice_loss (the paper's segmentation objective), and its GAP
+classification head (Normal vs Tumour, one logit per image) by binary
+cross-entropy against the image's tumour-present label.
 Evaluation pools predictions across the five test folds into one Dice and one
 image-level tumour-presence accuracy, matching the paper's metric.
 
@@ -29,6 +31,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 SRC_DIR = Path(__file__).resolve().parents[1]
@@ -43,6 +46,8 @@ PRESENCE_MIN_PIXELS = 20  # mask pixels above which an image counts as "tumour"
 
 
 class MLflowRun:
+    """Optional MLflow logging that never stops a training run."""
+
     def __init__(
         self, enabled: bool, experiment_name: str, run_name: str, tracking_uri: str = ""
     ):
@@ -85,6 +90,19 @@ class MLflowRun:
 
 
 class FoldDataset(Dataset):
+    """Serves images, the segmentation mask, and detection targets.
+
+    Reads the same materialised-fold layout as the rest of the pipeline
+    (fold_k/role/images, fold_k/role/labels; polygon label lines, one box per
+    line, normalised [0, 1] coordinates). Produces:
+      image     (3, S, S) grayscale replicated to RGB, matching what YOLO-style
+                 backbones expect.
+      mask      (S, S) union of every box in the file, for segmentation.
+      gt_box    (4,) the FIRST box in the file (or zeros if none), for
+                 detection supervision - see the module docstring's limitation.
+      gt_label  scalar, 1.0 if the file has any box, 0.0 otherwise.
+    """
+
     def __init__(self, fold_dir: Path, role: str, image_size: int = 512):
         self.images_dir = fold_dir / role / "images"
         self.labels_dir = fold_dir / role / "labels"
@@ -143,6 +161,11 @@ def image_level_correct(
     return int(((pred_area > threshold) == (gt_area > 0)).sum().item())
 
 
+def head_correct(cls_logits: torch.Tensor, gt_label: torch.Tensor) -> int:
+    """Count images where the classification head's call matches the label."""
+    return int(((cls_logits > 0) == (gt_label > 0.5)).sum().item())
+
+
 def train_one_fold(
     fold_dir: Path,
     model: YOLOSegNet,
@@ -155,6 +178,7 @@ def train_one_fold(
     det_weight: float,
     mlrun: MLflowRun | None,
     fold_idx: int,
+    cls_weight: float = 1.0,
 ) -> YOLOSegNet:
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     loader = DataLoader(
@@ -167,7 +191,8 @@ def train_one_fold(
     model.train()
     for epoch in range(epochs):
         running_total = running_seg = running_bbox = running_cls = 0.0
-        correct = total = 0
+        running_imgcls = 0.0
+        correct_head = correct_mask = total = 0
         for batch in loader:
             images = batch["image"].to(device)
             gt_mask = batch["mask"].unsqueeze(1).to(device)
@@ -177,12 +202,19 @@ def train_one_fold(
             }
 
             opt.zero_grad()
-            mask_logits, out_high, out_mid, out_low = model(images)
+            mask_logits, out_high, out_mid, out_low, cls_logits = model(images)
             seg_loss = bce_dice_loss(mask_logits, gt_mask)
             det_joint, det_bbox, det_cls = det_loss_fn(
                 (out_high, out_mid, out_low), targets
             )
-            loss = seg_weight * seg_loss + det_weight * det_joint
+            img_cls_loss = F.binary_cross_entropy_with_logits(
+                cls_logits, targets["gt_labels"]
+            )
+            loss = (
+                seg_weight * seg_loss
+                + det_weight * det_joint
+                + cls_weight * img_cls_loss
+            )
             loss.backward()
             opt.step()
 
@@ -190,17 +222,22 @@ def train_one_fold(
             running_seg += seg_loss.item()
             running_bbox += det_bbox.item()
             running_cls += det_cls.item()
+            running_imgcls += img_cls_loss.item()
             with torch.no_grad():
                 pred = (mask_logits > 0).float()
-                correct += image_level_correct(pred, gt_mask)
+                correct_mask += image_level_correct(pred, gt_mask)
+                correct_head += head_correct(cls_logits, targets["gt_labels"])
                 total += images.shape[0]
 
         n = len(loader)
-        acc = correct / total if total > 0 else 0.0
+        acc = correct_head / total if total > 0 else 0.0
+        acc_mask = correct_mask / total if total > 0 else 0.0
         print(
             f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | "
             f"loss {running_total / n:.4f} | seg {running_seg / n:.4f} | "
-            f"bbox {running_bbox / n:.4f} | cls {running_cls / n:.4f} | acc {acc:.4f}"
+            f"bbox {running_bbox / n:.4f} | cls {running_cls / n:.4f} | "
+            f"imgcls {running_imgcls / n:.4f} | acc {acc:.4f} | "
+            f"acc_mask {acc_mask:.4f}"
         )
         if mlrun is not None:
             mlrun.log_metric(
@@ -215,15 +252,22 @@ def train_one_fold(
             mlrun.log_metric(
                 f"fold_{fold_idx}_train_cls_loss", running_cls / n, step=epoch
             )
+            mlrun.log_metric(
+                f"fold_{fold_idx}_train_imgcls_loss", running_imgcls / n, step=epoch
+            )
             mlrun.log_metric(f"fold_{fold_idx}_train_acc", acc, step=epoch)
+            mlrun.log_metric(f"fold_{fold_idx}_train_acc_mask", acc_mask, step=epoch)
     return model
 
 
 @torch.no_grad()
 def evaluate_fold(
     fold_dir: Path, model: YOLOSegNet, device: str, batch_size: int, role: str = "test"
-) -> tuple[int, int, int, int, int]:
-    """Return (intersection, pred_area, gt_area, correct, total) for one fold."""
+) -> tuple[int, int, int, int, int, int]:
+    """Return (intersection, pred_area, gt_area, correct_head, correct_mask,
+    total) for one fold. correct_head counts images the GAP classification head
+    got right (the paper's classification metric); correct_mask counts images
+    where a mask of more than PRESENCE_MIN_PIXELS pixels matched the label."""
     model.eval()
     loader = DataLoader(
         FoldDataset(fold_dir, role, model.image_size),
@@ -231,18 +275,19 @@ def evaluate_fold(
         collate_fn=collate,
         shuffle=False,
     )
-    inter = pred_area = gt_area = correct = total = 0
+    inter = pred_area = gt_area = correct_head = correct_mask = total = 0
     for batch in loader:
         images = batch["image"].to(device)
         gt_mask = batch["mask"].unsqueeze(1).to(device)
-        mask_logits = model(images)[0]
+        mask_logits, _, _, _, cls_logits = model(images)
         pred = (mask_logits.sigmoid() > 0.5).float()
         inter += int((pred * gt_mask).sum().item())
         pred_area += int(pred.sum().item())
         gt_area += int(gt_mask.sum().item())
-        correct += image_level_correct(pred, gt_mask)
+        correct_mask += image_level_correct(pred, gt_mask)
+        correct_head += head_correct(cls_logits, batch["gt_label"].to(device))
         total += images.shape[0]
-    return inter, pred_area, gt_area, correct, total
+    return inter, pred_area, gt_area, correct_head, correct_mask, total
 
 
 def parse_args() -> argparse.Namespace:
@@ -271,10 +316,42 @@ def parse_args() -> argparse.Namespace:
         help="confidence used to build ROI masks internally",
     )
     model_args.add_argument("--max-roi-tokens", type=int, default=1024)
+    model_args.add_argument(
+        "--reduction",
+        type=int,
+        default=4,
+        help="key/value sequence reduction r in the RTrB (Eqs. 8-9); 1 turns it off",
+    )
+    model_args.add_argument(
+        "--ffn-expansion",
+        type=int,
+        default=4,
+        help="Mix-FFN hidden width as a multiple of channels",
+    )
+    model_args.add_argument(
+        "--width-multiple",
+        type=float,
+        default=1.0,
+        help="scales channels in the backbone, neck and "
+        "detection heads (YOLOv8: n .25, s .50, m .75, "
+        "l 1.0, x 1.25); BiLRA's dimension follows it",
+    )
+    model_args.add_argument(
+        "--depth-multiple",
+        type=float,
+        default=1.0,
+        help="scales C2f repeats (YOLOv8: n/s .33, m .67, l/x 1.0)",
+    )
 
     loss_args = p.add_argument_group("loss weighting")
     loss_args.add_argument("--seg-weight", type=float, default=1.0)
     loss_args.add_argument("--det-weight", type=float, default=1.0)
+    loss_args.add_argument(
+        "--cls-weight",
+        type=float,
+        default=1.0,
+        help="weight of the image-level classification loss",
+    )
 
     p.add_argument("--no-mlflow", action="store_true")
     p.add_argument("--mlflow-experiment", default="yoloseg_relational")
@@ -305,11 +382,18 @@ def main() -> int:
             "seg_weight": args.seg_weight,
             "det_weight": args.det_weight,
             "box_conf": args.box_conf,
+            "reduction": args.reduction,
+            "ffn_expansion": args.ffn_expansion,
+            "cls_weight": args.cls_weight,
+            "max_roi_tokens": args.max_roi_tokens,
+            "width_multiple": args.width_multiple,
+            "depth_multiple": args.depth_multiple,
         }
     )
 
     eps = 1e-7
-    total_inter = total_pred = total_gt = total_correct = total_images = 0
+    total_inter = total_pred = total_gt = total_images = 0
+    total_correct_head = total_correct_mask = 0
     per_fold = {}
 
     for fold in range(args.n_folds):
@@ -324,7 +408,17 @@ def main() -> int:
             n_regions=args.n_regions,
             topk=args.topk,
             box_conf=args.box_conf,
+            reduction=args.reduction,
+            ffn_expansion=args.ffn_expansion,
+            max_roi_tokens=args.max_roi_tokens,
+            width_multiple=args.width_multiple,
+            depth_multiple=args.depth_multiple,
         ).to(args.device)
+        print(
+            f" model: width {args.width_multiple}, depth {args.depth_multiple}, "
+            f"BiLRA dim {model.backbone_tail_channels}, "
+            f"{sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters"
+        )
         det_loss_fn = YOLODetectionLoss(num_classes=1)
 
         model = train_one_fold(
@@ -339,23 +433,30 @@ def main() -> int:
             args.det_weight,
             mlrun,
             fold,
+            cls_weight=args.cls_weight,
         )
         torch.save(model.state_dict(), args.output / f"model_fold{fold}.pth")
 
-        inter, pred, gt, correct, total = evaluate_fold(
+        inter, pred, gt, correct_head, correct_mask, total = evaluate_fold(
             fold_dir, model, args.device, args.batch_size
         )
         fold_dice = (2 * inter + eps) / (pred + gt + eps)
-        fold_acc = correct / total if total > 0 else 0.0
-        per_fold[fold] = {"dice": fold_dice, "acc": fold_acc}
-        print(f" fold {fold} test dice {fold_dice:.4f} | acc {fold_acc:.4f}")
+        fold_acc = correct_head / total if total > 0 else 0.0
+        fold_acc_mask = correct_mask / total if total > 0 else 0.0
+        per_fold[fold] = {"dice": fold_dice, "acc": fold_acc, "acc_mask": fold_acc_mask}
+        print(
+            f" fold {fold} test dice {fold_dice:.4f} | acc {fold_acc:.4f} "
+            f"| acc_mask {fold_acc_mask:.4f}"
+        )
         mlrun.log_metric(f"fold_{fold}_test_dice", fold_dice, step=args.epochs)
         mlrun.log_metric(f"fold_{fold}_test_acc", fold_acc, step=args.epochs)
+        mlrun.log_metric(f"fold_{fold}_test_acc_mask", fold_acc_mask, step=args.epochs)
 
         total_inter += inter
         total_pred += pred
         total_gt += gt
-        total_correct += correct
+        total_correct_head += correct_head
+        total_correct_mask += correct_mask
         total_images += total
 
         del model
@@ -363,18 +464,24 @@ def main() -> int:
             torch.cuda.empty_cache()
 
     pooled_dice = (2 * total_inter + eps) / (total_pred + total_gt + eps)
-    pooled_acc = total_correct / total_images if total_images > 0 else 0.0
+    pooled_acc = total_correct_head / total_images if total_images > 0 else 0.0
+    pooled_acc_mask = total_correct_mask / total_images if total_images > 0 else 0.0
     report = {
         "pooled_dice": pooled_dice,
         "pooled_acc": pooled_acc,
+        "pooled_acc_mask": pooled_acc_mask,
         "per_fold": per_fold,
     }
     (args.output / "pooled_metrics.json").write_text(json.dumps(report, indent=2))
     mlrun.log_metric("pooled_dice", pooled_dice)
     mlrun.log_metric("pooled_acc", pooled_acc)
+    mlrun.log_metric("pooled_acc_mask", pooled_acc_mask)
     mlrun.end()
 
-    print(f"\npooled Dice: {pooled_dice:.4f} | pooled Acc: {pooled_acc:.4f}")
+    print(
+        f"\npooled Dice: {pooled_dice:.4f} | pooled Acc: {pooled_acc:.4f} "
+        f"| pooled Acc (mask-derived): {pooled_acc_mask:.4f}"
+    )
     print(f"metrics written to {args.output / 'pooled_metrics.json'}")
     return 0
 

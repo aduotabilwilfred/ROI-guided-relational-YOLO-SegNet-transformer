@@ -32,6 +32,21 @@ Fixes made to the submitted skeleton, each checked against the running model:
      coarsest scale alone. Replaced with the tested AllMLPDecoder, which fuses
      all four relational stages rather than reading only the last one.
 
+  6. SegFormer encoder parts added to each relational stage: Mix-FFN (Eq. 10,
+     utils/mix_ffn.py) after every RTrB, and the key/value sequence reduction
+     of Eqs. 8-9 inside the RTrB (reduction=r; 1 turns it off).
+
+  7. Image-level classification head: global average pooling over the coarsest
+     stage (s5) followed by one linear layer gives a single Normal-vs-Tumour
+     logit, returned as the fifth output. Its placement is a choice; the paper
+     names a GAP classification head without giving its exact input.
+
+  8. width_multiple / depth_multiple scale the YOLO side (backbone, neck and
+     detection heads), as Ultralytics' YOLOv8 n/s/m/l/x do. Channel counts are
+     rounded up to a multiple of 8; C2f repeat counts are scaled and never drop
+     below 1. BiLRA's dimension follows the backbone tail's channel count.
+     Defaults of 1.0 / 1.0 reproduce the model exactly as before.
+
 Kept as in the submission: the CBS/Bottleneck/C2f backbone, the three
 DetectionHead branches and their box/cls outputs, and the output-patch-
 embedding unification onto one h/4 grid.
@@ -39,6 +54,7 @@ embedding unification onto one h/4 grid.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -52,8 +68,25 @@ if str(SRC_DIR) not in sys.path:
 
 from utils.allmlp_decoder import AllMLPDecoder
 from utils.bilra_attention import BiLevelRoutingAttention
+from utils.mix_ffn import MixFFN
 from utils.roi_partition import build_roi_masks
 from utils.rtrb import RelationalTransformerBlock
+
+
+def make_divisible(x: float, divisor: int = 8) -> int:
+    """Round a scaled channel count up to a multiple of divisor.
+
+    Ultralytics does the same. Keeping every width a multiple of 8 means the
+    channels always split evenly across attention heads (default 8) and C2f's
+    channel halving never lands on an odd number.
+    """
+    return int(math.ceil(x / divisor) * divisor)
+
+
+def scale_depth(n: int, depth_multiple: float) -> int:
+    """Scale a C2f repeat count; a single repeat is never scaled away."""
+    return max(round(n * depth_multiple), 1) if n > 1 else n
+
 
 # --- 1. BASIC BUILDING BLOCKS FROM THE DIAGRAM (unchanged) -----------------
 
@@ -163,27 +196,63 @@ class YOLOSegNet(nn.Module):
         n_regions: int = 4,
         topk: int = 4,
         box_conf: float = 0.5,
+        reduction: int = 4,
+        ffn_expansion: int = 4,
+        max_roi_tokens: int = 1024,
+        width_multiple: float = 1.0,
+        depth_multiple: float = 1.0,
     ):
         super().__init__()
         self.box_conf = box_conf  # confidence used to build ROI masks
 
+        # Width / depth multipliers for the YOLO side (backbone, neck, heads),
+        # defined the way Ultralytics defines YOLOv8 n/s/m/l/x. 1.0 / 1.0 is
+        # the model exactly as it was before these arguments existed.
+        if width_multiple <= 0 or depth_multiple <= 0:
+            raise ValueError(
+                "width_multiple and depth_multiple must be > 0, got "
+                f"{width_multiple} and {depth_multiple}"
+            )
+
+        def w(channels: int) -> int:
+            return make_divisible(channels * width_multiple)
+
+        def d(repeats: int) -> int:
+            return scale_depth(repeats, depth_multiple)
+
+        # BiLRA runs on the backbone's last feature map, so its dimension IS
+        # that map's channel count: one value, derived here, not a free setting.
+        # (A mismatch fails inside BiLRA's linear layers; see the notes
+        # returned with this change.) The channels must also split evenly over
+        # the attention heads.
+        tail = w(512)
+        if tail % num_heads != 0:
+            raise ValueError(
+                f"width_multiple={width_multiple} gives the backbone tail {tail} "
+                f"channels, which num_heads={num_heads} does not divide; choose "
+                "a different width_multiple or num_heads"
+            )
+        self.width_multiple = width_multiple
+        self.depth_multiple = depth_multiple
+        self.backbone_tail_channels = tail
+
         # --- BACKBONE ---
-        self.p1 = CBS(3, 32, k=3, s=2, p=1)  # h/2
-        self.p2 = CBS(32, 64, k=3, s=2, p=1)  # h/4
-        self.p3 = C2f(64, 128, n=3)  # h/4
-        self.p4 = CBS(128, 128, k=3, s=2, p=1)  # h/8
-        self.p5 = C2f(128, 256, n=6)  # h/8
-        self.p6 = CBS(256, 256, k=3, s=2, p=1)  # h/16
-        self.p7 = C2f(256, 512, n=6)  # h/16
-        self.p8 = CBS(512, 512, k=3, s=2, p=1)  # h/32
-        self.p9 = C2f(512, 512, n=3)  # h/32
+        self.p1 = CBS(3, w(32), k=3, s=2, p=1)  # h/2
+        self.p2 = CBS(w(32), w(64), k=3, s=2, p=1)  # h/4
+        self.p3 = C2f(w(64), w(128), n=d(3))  # h/4
+        self.p4 = CBS(w(128), w(128), k=3, s=2, p=1)  # h/8
+        self.p5 = C2f(w(128), w(256), n=d(6))  # h/8
+        self.p6 = CBS(w(256), w(256), k=3, s=2, p=1)  # h/16
+        self.p7 = C2f(w(256), w(512), n=d(6))  # h/16
+        self.p8 = CBS(w(512), w(512), k=3, s=2, p=1)  # h/32
+        self.p9 = C2f(w(512), w(512), n=d(3))  # h/32
 
         # BiLRA needs a region grid that evenly divides the feature map; the
         # backbone tail is h/32 (16x16 for a 512 input), so n_regions must
         # divide that resolution. Same routing/local-context mechanism as the
         # tested module, applied where the figure places Bi-Former Att.
         self.biformer = BiLevelRoutingAttention(
-            512, num_heads=num_heads, n_regions=n_regions, topk=topk
+            tail, num_heads=num_heads, n_regions=n_regions, topk=topk
         )
 
         # --- NECK: a real top-down / bottom-up FPN ---
@@ -197,21 +266,23 @@ class YOLOSegNet(nn.Module):
         # arrows actually draw it.
         #   top-down (upsample + concat):  x9 (h/32) -> p_h16 -> p_h8
         #   bottom-up (stride2 + concat):  p_h8 -> n_h16 -> n_h32
-        self.reduce_x9 = CBS(512, 256, k=1, s=1, p=0)
-        self.fuse_h16_td = C2f(256 + 512, 256, n=3)  # x9-up (256) + x6 (512)
-        self.reduce_h16 = CBS(256, 128, k=1, s=1, p=0)
-        self.fuse_h8_td = C2f(128 + 256, 128, n=3)  # h16-up (128) + x4 (256)
+        # Every concat input below is built from the same w() values the layers
+        # that produce it use, so the channel counts agree at any multiplier.
+        self.reduce_x9 = CBS(w(512), w(256), k=1, s=1, p=0)
+        self.fuse_h16_td = C2f(w(256) + w(512), w(256), n=d(3))  # x9-up + x6
+        self.reduce_h16 = CBS(w(256), w(128), k=1, s=1, p=0)
+        self.fuse_h8_td = C2f(w(128) + w(256), w(128), n=d(3))  # h16-up + x4
 
-        self.down_h8_to_h16 = CBS(128, 128, k=3, s=2, p=1)
-        self.fuse_h16_bu = C2f(128 + 256, 256, n=3)  # p_h8-down (128) + p_h16_td (256)
-        self.down_h16_to_h32 = CBS(256, 256, k=3, s=2, p=1)
+        self.down_h8_to_h16 = CBS(w(128), w(128), k=3, s=2, p=1)
+        self.fuse_h16_bu = C2f(w(128) + w(256), w(256), n=d(3))  # p_h8-down + p_h16_td
+        self.down_h16_to_h32 = CBS(w(256), w(256), k=3, s=2, p=1)
         self.fuse_h32_bu = C2f(
-            256 + 256, 512, n=3
-        )  # n_h16-down (256) + x9 (256, reduced)
+            w(256) + w(256), w(512), n=d(3)
+        )  # n_h16-down + x9 (reduced)
 
-        self.head_high = DetectionHead(128, num_classes)  # h/8
-        self.head_mid = DetectionHead(256, num_classes)  # h/16
-        self.head_low = DetectionHead(512, num_classes)  # h/32
+        self.head_high = DetectionHead(w(128), num_classes)  # h/8
+        self.head_mid = DetectionHead(w(256), num_classes)  # h/16
+        self.head_low = DetectionHead(w(512), num_classes)  # h/32
 
         # --- Output patch embedding: unify the three heads onto one h/4 grid.
         self.patch_embedding = CBS(5 * 3, c1, k=3, s=1, p=1)
@@ -224,10 +295,18 @@ class YOLOSegNet(nn.Module):
         self.down_h16 = CBS(c2, c3, k=3, s=2, p=1)
         self.down_h32 = CBS(c3, c4, k=3, s=2, p=1)
 
-        self.rtrb1 = RelationalTransformerBlock(c1, embed_dim, num_heads)
-        self.rtrb2 = RelationalTransformerBlock(c2, embed_dim, num_heads)
-        self.rtrb4 = RelationalTransformerBlock(c3, embed_dim, num_heads)
-        self.rtrb5 = RelationalTransformerBlock(c4, embed_dim, num_heads)
+        self.rtrb1 = RelationalTransformerBlock(
+            c1, embed_dim, num_heads, max_roi_tokens=max_roi_tokens, reduction=reduction
+        )
+        self.rtrb2 = RelationalTransformerBlock(
+            c2, embed_dim, num_heads, max_roi_tokens=max_roi_tokens, reduction=reduction
+        )
+        self.rtrb4 = RelationalTransformerBlock(
+            c3, embed_dim, num_heads, max_roi_tokens=max_roi_tokens, reduction=reduction
+        )
+        self.rtrb5 = RelationalTransformerBlock(
+            c4, embed_dim, num_heads, max_roi_tokens=max_roi_tokens, reduction=reduction
+        )
         # RTrB emits 2*embed_dim channels (Eq. 20's channel concat); project
         # each stage back so the decoder receives the channel widths it needs.
         self.proj1 = nn.Conv2d(2 * embed_dim, c1, kernel_size=1)
@@ -243,6 +322,16 @@ class YOLOSegNet(nn.Module):
             num_classes=1,
             out_size=image_size,
         )
+
+        # Mix-FFN (Eq. 10) after each relational stage, with its own residual.
+        self.ffn1 = MixFFN(c1, ffn_expansion)
+        self.ffn2 = MixFFN(c2, ffn_expansion)
+        self.ffn4 = MixFFN(c3, ffn_expansion)
+        self.ffn5 = MixFFN(c4, ffn_expansion)
+
+        # Image-level Normal vs Tumour head: global average pooling over the
+        # coarsest stage, then one linear layer to a single tumour logit.
+        self.cls_head = nn.Linear(c4, 1)
 
     def _boxes_from_head(
         self, head_out: torch.Tensor, max_boxes: int = 8
@@ -292,7 +381,7 @@ class YOLOSegNet(nn.Module):
 
     def forward(
         self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         h, w = x.shape[-2:]
         if (h, w) != (self.image_size, self.image_size):
             raise ValueError(
@@ -374,28 +463,37 @@ class YOLOSegNet(nn.Module):
         masks_h4 = build_roi_masks(
             boxes, target_h, target_w, dilation=self.dilation, device=x.device
         )
-        s1 = self.proj1(self.rtrb1(feat_h4, masks_h4.m_mask, masks_h4.w_mask))
+        s1 = self.ffn1(
+            self.proj1(self.rtrb1(feat_h4, masks_h4.m_mask, masks_h4.w_mask))
+        )
 
         feat_h8 = self.down_h8(s1)
         hh8, ww8 = feat_h8.shape[-2:]
         masks_h8 = build_roi_masks(
             boxes, hh8, ww8, dilation=self.dilation, device=x.device
         )
-        s2 = self.proj2(self.rtrb2(feat_h8, masks_h8.m_mask, masks_h8.w_mask))
+        s2 = self.ffn2(
+            self.proj2(self.rtrb2(feat_h8, masks_h8.m_mask, masks_h8.w_mask))
+        )
 
         feat_h16 = self.down_h16(s2)
         hh16, ww16 = feat_h16.shape[-2:]
         masks_h16 = build_roi_masks(
             boxes, hh16, ww16, dilation=self.dilation, device=x.device
         )
-        s4 = self.proj4(self.rtrb4(feat_h16, masks_h16.m_mask, masks_h16.w_mask))
+        s4 = self.ffn4(
+            self.proj4(self.rtrb4(feat_h16, masks_h16.m_mask, masks_h16.w_mask))
+        )
 
         feat_h32 = self.down_h32(s4)
         hh32, ww32 = feat_h32.shape[-2:]
         masks_h32 = build_roi_masks(
             boxes, hh32, ww32, dilation=self.dilation, device=x.device
         )
-        s5 = self.proj5(self.rtrb5(feat_h32, masks_h32.m_mask, masks_h32.w_mask))
+        s5 = self.ffn5(
+            self.proj5(self.rtrb5(feat_h32, masks_h32.m_mask, masks_h32.w_mask))
+        )
 
         mask_logits = self.decoder([s1, s2, s4, s5])  # (B, 1, H, W)
-        return mask_logits, out_high, out_mid, out_low
+        cls_logits = self.cls_head(s5.mean(dim=(-2, -1)))  # GAP -> (B, 1)
+        return mask_logits, out_high, out_mid, out_low, cls_logits

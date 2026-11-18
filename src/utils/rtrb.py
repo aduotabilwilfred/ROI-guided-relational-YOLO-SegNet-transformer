@@ -60,8 +60,11 @@ class RelationalTransformerBlock(nn.Module):
         embed_dim: int = 128,
         num_heads: int = 8,
         max_roi_tokens: int = 1024,
+        reduction: int = 1,
     ):
         super().__init__()
+        if reduction < 1:
+            raise ValueError(f"reduction must be >= 1, got {reduction}")
         if embed_dim % num_heads != 0:
             raise ValueError(
                 f"embed_dim {embed_dim} not divisible by num_heads {num_heads}"
@@ -80,6 +83,25 @@ class RelationalTransformerBlock(nn.Module):
         # below it, gather is unaffected (verified bit-identical output on a
         # mask under the cap, same seed, before vs after this was added).
         self.max_roi_tokens = max_roi_tokens
+
+        # SegFormer's efficient attention (Eqs. 8-9): shorten the key and value
+        # sequences by a factor r before attention, which cuts the cost of the
+        # score matrix by r. Each group of r consecutive tokens is concatenated
+        # along channels, (n, C) -> (n/r, C*r), then a linear layer maps it back
+        # to C. efficient_attention.py implements the same idea with a strided
+        # conv, which needs a dense (B, C, H, W) map; the tokens here are
+        # gathered ROI tokens with no grid, so the reshape + linear form of the
+        # equations is used instead. reduction=1 creates no layers and leaves
+        # the block exactly as it was (same state_dict, same output). The paper
+        # does not give r; it is a constructor argument.
+        self.reduction = reduction
+        if reduction > 1:
+
+            def reducer():
+                return nn.Linear(reduction * embed_dim, embed_dim)
+
+            self.red_k_sa, self.red_v_sa = reducer(), reducer()
+            self.red_k_ca, self.red_v_ca = reducer(), reducer()
 
         # Q/K/V generators: 3x3 convs (paper). Self head reads f_m for all
         # three; cross head reads f_m for query, f_w for key and value.
@@ -124,6 +146,18 @@ class RelationalTransformerBlock(nn.Module):
         perm = torch.randperm(idx.numel(), device=idx.device)[: self.max_roi_tokens]
         return idx[perm]
 
+    def _reduce(self, tokens: torch.Tensor, linear: nn.Module) -> torch.Tensor:
+        """Eqs. 8-9: (n, C) -> (ceil(n / r), C) over a gathered token sequence.
+
+        When n is not a multiple of r, the last token is repeated to fill the
+        final group, so no token is dropped and no zero key is introduced.
+        """
+        r = self.reduction
+        pad = (-tokens.shape[0]) % r
+        if pad:
+            tokens = torch.cat([tokens, tokens[-1:].expand(pad, -1)], dim=0)
+        return linear(tokens.reshape(-1, r * tokens.shape[1]))
+
     def forward(
         self, feat: torch.Tensor, m_mask: torch.Tensor, w_mask: torch.Tensor
     ) -> torch.Tensor:
@@ -166,18 +200,26 @@ class RelationalTransformerBlock(nn.Module):
             w_idx = self._cap(w_flat[i].nonzero(as_tuple=True)[0])  # ring tokens
 
             # Self-attention over tumour tokens only.
+            k_s, v_s = k_sa[i, m_idx], v_sa[i, m_idx]
+            if self.reduction > 1:
+                k_s = self._reduce(k_s, self.red_k_sa)
+                v_s = self._reduce(v_s, self.red_v_sa)
             qs = self._heads(q_sa[i, m_idx])
-            ks = self._heads(k_sa[i, m_idx])
-            vs = self._heads(v_sa[i, m_idx])
+            ks = self._heads(k_s)
+            vs = self._heads(v_s)
             att_sa = self._attend_tokens(qs, ks, vs)  # (heads, m, hd)
             g_sa[i, m_idx] = att_sa.permute(1, 0, 2).reshape(-1, self.embed_dim)
 
             # Cross-attention: tumour queries, ring keys/values. If no ring
             # tokens, cross-attention has nothing to attend to; leave zeros.
             if w_idx.numel() > 0:
+                k_c, v_c = k_ca[i, w_idx], v_ca[i, w_idx]
+                if self.reduction > 1:
+                    k_c = self._reduce(k_c, self.red_k_ca)
+                    v_c = self._reduce(v_c, self.red_v_ca)
                 qc = self._heads(q_ca[i, m_idx])
-                kc = self._heads(k_ca[i, w_idx])
-                vc = self._heads(v_ca[i, w_idx])
+                kc = self._heads(k_c)
+                vc = self._heads(v_c)
                 att_ca = self._attend_tokens(qc, kc, vc)  # (heads, m, hd)
                 g_ca[i, m_idx] = att_ca.permute(1, 0, 2).reshape(-1, self.embed_dim)
 
