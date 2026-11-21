@@ -40,7 +40,7 @@ if str(SRC_DIR) not in sys.path:
 
 from models.yolo_detection_loss import YOLODetectionLoss
 from models.yoloseg_relational import YOLOSegNet
-from utils.losses import bce_dice_loss
+from utils.losses import bce_dice_loss, dice_loss
 
 PRESENCE_MIN_PIXELS = 20  # mask pixels above which an image counts as "tumour"
 
@@ -166,6 +166,26 @@ def head_correct(cls_logits: torch.Tensor, gt_label: torch.Tensor) -> int:
     return int(((cls_logits > 0) == (gt_label > 0.5)).sum().item())
 
 
+def seg_objective(
+    mask_logits: torch.Tensor, gt_mask: torch.Tensor, pos_weight: float
+) -> torch.Tensor:
+    """BCE + Dice. With pos_weight > 1, tumour pixels count more in the BCE term.
+
+    Tumour covers about 1.7% of each image, so plain BCE can be lowered by
+    predicting background everywhere; the Dice term gives little gradient on
+    positive images once probabilities are near zero. Weighting the positive
+    pixels stops that collapse (checked on real fold-0 data).
+    """
+    if pos_weight == 1.0:
+        return bce_dice_loss(mask_logits, gt_mask)
+    bce = F.binary_cross_entropy_with_logits(
+        mask_logits,
+        gt_mask,
+        pos_weight=torch.tensor(pos_weight, device=mask_logits.device),
+    )
+    return 0.5 * bce + 0.5 * dice_loss(mask_logits, gt_mask)
+
+
 def train_one_fold(
     fold_dir: Path,
     model: YOLOSegNet,
@@ -179,6 +199,7 @@ def train_one_fold(
     mlrun: MLflowRun | None,
     fold_idx: int,
     cls_weight: float = 1.0,
+    pos_weight: float = 1.0,
 ) -> YOLOSegNet:
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     loader = DataLoader(
@@ -203,7 +224,7 @@ def train_one_fold(
 
             opt.zero_grad()
             mask_logits, out_high, out_mid, out_low, cls_logits = model(images)
-            seg_loss = bce_dice_loss(mask_logits, gt_mask)
+            seg_loss = seg_objective(mask_logits, gt_mask, pos_weight)
             det_joint, det_bbox, det_cls = det_loss_fn(
                 (out_high, out_mid, out_low), targets
             )
@@ -298,8 +319,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output", type=Path, default=Path("runs/yoloseg_relational"))
     p.add_argument("--n-folds", type=int, default=5)
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--lr", type=float, default=3e-5)
+    p.add_argument(
+        "--pos-weight",
+        type=float,
+        default=55.0,
+        help="BCE weight on tumour pixels (about (1-p)/p; tumour is "
+        "~1.7%% of pixels). 1.0 turns the weighting off.",
+    )
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--image-size", type=int, default=512)
 
@@ -375,6 +403,7 @@ def main() -> int:
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
+            "pos_weight": args.pos_weight,
             "image_size": args.image_size,
             "embed_dim": args.embed_dim,
             "num_heads": args.num_heads,
@@ -434,6 +463,7 @@ def main() -> int:
             mlrun,
             fold,
             cls_weight=args.cls_weight,
+            pos_weight=args.pos_weight,
         )
         torch.save(model.state_dict(), args.output / f"model_fold{fold}.pth")
 
