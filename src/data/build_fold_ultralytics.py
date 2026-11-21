@@ -15,6 +15,39 @@ from osgdf_preprocessing import apply_sg_filter
 from prepare_dataset import Letterbox
 
 
+def letterbox_label_file(
+    label_path: Path, dest: Path, height: int, width: int, target: int
+) -> None:
+    """Write the label with its polygons mapped into the letterboxed image frame.
+
+    The fold image is letterboxed (scaled and padded onto a target x target
+    canvas), so its labels must follow the same transform. Copying the raw
+    label unchanged puts every mask in the wrong place on any non-square image.
+    Coordinates are normalised to the canvas on output. A background image
+    still gets an empty label file.
+    """
+    if dest.exists() or dest.is_symlink():
+        dest.unlink()
+    if not label_path.exists():
+        dest.write_text("")
+        return
+    lb = Letterbox.build(height, width, target)
+    out_lines = []
+    for line in label_path.read_text().splitlines():
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        vals = [float(v) for v in parts[1:]]
+        pts = list(zip(vals[0::2], vals[1::2]))
+        coords = []
+        for px, py in lb.apply_points(pts):
+            coords.extend(
+                (min(1.0, max(0.0, px / target)), min(1.0, max(0.0, py / target)))
+            )
+        out_lines.append(parts[0] + " " + " ".join(f"{c:.6f}" for c in coords))
+    dest.write_text("\n".join(out_lines) + ("\n" if out_lines else ""))
+
+
 def denoise_to_disk(
     image_path: Path, out_path: Path, window: int, poly: int, target: int
 ) -> None:
@@ -118,7 +151,12 @@ def build_fold(
             poly,
             target,
         )
-        place_label(record["label_path"], labels_dir / f"{stem}.txt", use_symlink)
+        img_h, img_w = cv2.imread(
+            str(record["image_path"]), cv2.IMREAD_GRAYSCALE
+        ).shape[:2]
+        letterbox_label_file(
+            record["label_path"], labels_dir / f"{stem}.txt", img_h, img_w, target
+        )
         counts[role] += 1
 
     yaml_path = write_dataset_yaml(fold_dir, class_names, has_test=counts["test"] > 0)
