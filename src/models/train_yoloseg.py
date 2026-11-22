@@ -317,6 +317,53 @@ def evaluate_fold(
     return inter, pred_area, gt_area, correct_head, correct_mask, total
 
 
+def _elementwise_iou(
+    a: torch.Tensor, b: torch.Tensor, eps: float = 1e-7
+) -> torch.Tensor:
+    """IoU of matched (N, 4) xyxy box pairs."""
+    ix1, iy1 = torch.maximum(a[:, 0], b[:, 0]), torch.maximum(a[:, 1], b[:, 1])
+    ix2, iy2 = torch.minimum(a[:, 2], b[:, 2]), torch.minimum(a[:, 3], b[:, 3])
+    inter = (ix2 - ix1).clamp(min=0) * (iy2 - iy1).clamp(min=0)
+    area_a = (a[:, 2] - a[:, 0]).clamp(min=0) * (a[:, 3] - a[:, 1]).clamp(min=0)
+    area_b = (b[:, 2] - b[:, 0]).clamp(min=0) * (b[:, 3] - b[:, 1]).clamp(min=0)
+    return inter / (area_a + area_b - inter + eps)
+
+
+@torch.no_grad()
+def evaluate_boxes(
+    fold_dir: Path, model: YOLOSegNet, device: str, batch_size: int, role: str = "test"
+) -> torch.Tensor:
+    """IoU between the most confident predicted box and the ground-truth box,
+    for each tumour image in the split. The most confident cell is taken across
+    all three detection scales. Returns a 1-D tensor of IoUs (one per tumour
+    image); background images have no ground-truth box and are skipped."""
+    model.eval()
+    loader = DataLoader(
+        FoldDataset(fold_dir, role, model.image_size),
+        batch_size=batch_size,
+        collate_fn=collate,
+        shuffle=False,
+    )
+    ious = []
+    for batch in loader:
+        images = batch["image"].to(device)
+        gt_label = batch["gt_label"].to(device)
+        gt_box = batch["gt_box"].to(device)
+        _, out_high, out_mid, out_low, _ = model(images)
+        # (B, 5, H, W) per scale -> (B, cells, 5), then join the scales.
+        flat = torch.cat(
+            [t.flatten(2).transpose(1, 2) for t in (out_high, out_mid, out_low)], dim=1
+        )
+        best = flat[..., 4].sigmoid().argmax(dim=1)
+        pred = flat[torch.arange(flat.shape[0], device=device), best, :4]
+        pos = gt_label[:, 0] > 0.5
+        if pos.any():
+            ious.append(_elementwise_iou(pred[pos], gt_box[pos]).cpu())
+    if not ious:
+        return torch.zeros(0)
+    return torch.cat(ious)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Train the joint Relational YOLO-SegNet (Track B)."
@@ -434,6 +481,7 @@ def main() -> int:
     eps = 1e-7
     total_inter = total_pred = total_gt = total_images = 0
     total_correct_head = total_correct_mask = 0
+    all_box_ious: list[torch.Tensor] = []
     per_fold = {}
 
     for fold in range(args.n_folds):
@@ -493,6 +541,23 @@ def main() -> int:
         mlrun.log_metric(f"fold_{fold}_test_acc", fold_acc, step=args.epochs)
         mlrun.log_metric(f"fold_{fold}_test_acc_mask", fold_acc_mask, step=args.epochs)
 
+        box_ious = evaluate_boxes(fold_dir, model, args.device, args.batch_size)
+        all_box_ious.append(box_ious)
+        fold_box_iou = float(box_ious.mean()) if box_ious.numel() else 0.0
+        fold_box_hit = (
+            float((box_ious >= 0.5).float().mean()) if box_ious.numel() else 0.0
+        )
+        per_fold[fold]["box_iou"] = fold_box_iou
+        per_fold[fold]["box_iou_at_0.5"] = fold_box_hit
+        print(
+            f" fold {fold} test box IoU {fold_box_iou:.4f} "
+            f"| boxes with IoU>=0.5 {fold_box_hit:.4f} (n={box_ious.numel()})"
+        )
+        mlrun.log_metric(f"fold_{fold}_test_box_iou", fold_box_iou, step=args.epochs)
+        mlrun.log_metric(
+            f"fold_{fold}_test_box_iou_at_0.5", fold_box_hit, step=args.epochs
+        )
+
         total_inter += inter
         total_pred += pred
         total_gt += gt
@@ -507,21 +572,32 @@ def main() -> int:
     pooled_dice = (2 * total_inter + eps) / (total_pred + total_gt + eps)
     pooled_acc = total_correct_head / total_images if total_images > 0 else 0.0
     pooled_acc_mask = total_correct_mask / total_images if total_images > 0 else 0.0
+    pooled_ious = torch.cat(all_box_ious) if all_box_ious else torch.zeros(0)
+    pooled_box_iou = float(pooled_ious.mean()) if pooled_ious.numel() else 0.0
+    pooled_box_hit = (
+        float((pooled_ious >= 0.5).float().mean()) if pooled_ious.numel() else 0.0
+    )
     report = {
         "pooled_dice": pooled_dice,
         "pooled_acc": pooled_acc,
         "pooled_acc_mask": pooled_acc_mask,
+        "pooled_box_iou": pooled_box_iou,
+        "pooled_box_iou_at_0.5": pooled_box_hit,
         "per_fold": per_fold,
     }
     (args.output / "pooled_metrics.json").write_text(json.dumps(report, indent=2))
     mlrun.log_metric("pooled_dice", pooled_dice)
     mlrun.log_metric("pooled_acc", pooled_acc)
     mlrun.log_metric("pooled_acc_mask", pooled_acc_mask)
+    mlrun.log_metric("pooled_box_iou", pooled_box_iou)
+    mlrun.log_metric("pooled_box_iou_at_0.5", pooled_box_hit)
     mlrun.end()
 
     print(
         f"\npooled Dice: {pooled_dice:.4f} | pooled Acc: {pooled_acc:.4f} "
-        f"| pooled Acc (mask-derived): {pooled_acc_mask:.4f}"
+        f"| pooled Acc (mask-derived): {pooled_acc_mask:.4f} "
+        f"| pooled box IoU: {pooled_box_iou:.4f} "
+        f"| boxes IoU>=0.5: {pooled_box_hit:.4f}"
     )
     print(f"metrics written to {args.output / 'pooled_metrics.json'}")
     return 0
