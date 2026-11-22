@@ -64,6 +64,34 @@ class YOLODetectionLoss(nn.Module):
         ciou = iou - center_dist_sq / diag_sq - alpha * v
         return (1.0 - ciou).mean()
 
+    def _positive_cell_mask(self, gt_boxes, hg, wg):
+        """Which grid cells are responsible for each ground-truth box.
+
+        gt_boxes: (N, 4) normalised xyxy. Returns a (N, hg * wg) bool mask.
+        A cell is responsible when its centre lies inside the box, plus the
+        cell that contains the box centre, so even a box smaller than one
+        cell keeps exactly one responsible cell. This follows the
+        anchor-free, centre-based convention the paper describes for YOLOv8
+        (it does not spell out the rule itself).
+        """
+        device, dtype = gt_boxes.device, gt_boxes.dtype
+        n = gt_boxes.shape[0]
+        ys = (torch.arange(hg, device=device, dtype=dtype) + 0.5) / hg
+        xs = (torch.arange(wg, device=device, dtype=dtype) + 0.5) / wg
+        cy, cx = torch.meshgrid(ys, xs, indexing="ij")
+        cx, cy = cx.reshape(1, -1), cy.reshape(1, -1)
+
+        x1, y1, x2, y2 = (t.unsqueeze(1) for t in gt_boxes.unbind(-1))
+        inside = (cx >= x1) & (cx <= x2) & (cy >= y1) & (cy <= y2)
+
+        gcx = (gt_boxes[:, 0] + gt_boxes[:, 2]) / 2
+        gcy = (gt_boxes[:, 1] + gt_boxes[:, 3]) / 2
+        ci = (gcx * wg).floor().clamp(0, wg - 1).long()
+        cj = (gcy * hg).floor().clamp(0, hg - 1).long()
+        centre = torch.zeros_like(inside)
+        centre[torch.arange(n, device=device), cj * wg + ci] = True
+        return inside | centre
+
     def forward(self, head_outputs, targets):
         """
         head_outputs: Tuple containing raw tensors from your 3 detection heads:
@@ -110,16 +138,15 @@ class YOLODetectionLoss(nn.Module):
             pos_batch_indices = torch.where(gt_labels == 1.0)[0]
 
             if len(pos_batch_indices) > 0:
-                # Isolate the boxes that correspond to valid tumor samples
-                pos_pred_boxes = pred_boxes_raw[pos_batch_indices].view(-1, 4)
-
-                # Expand ground truth boxes to calculate metrics against matching grid spaces
-                pos_gt_boxes = (
-                    gt_boxes[pos_batch_indices]
-                    .unsqueeze(1)
-                    .repeat(1, head_flat.shape[1], 1)
-                    .view(-1, 4)
-                )
+                # Only the cells responsible for each tumour box regress it.
+                # Training every cell toward the same whole-image box made the
+                # head predict a blurred average, which kept the loss near 1.0.
+                pos_gt = gt_boxes[pos_batch_indices]
+                resp = self._positive_cell_mask(
+                    pos_gt, head_tensor.shape[2], head_tensor.shape[3]
+                )  # (P, Hg*Wg)
+                pos_pred_boxes = pred_boxes_raw[pos_batch_indices][resp]
+                pos_gt_boxes = pos_gt.unsqueeze(1).expand(-1, resp.shape[1], -1)[resp]
 
                 # DetectionHead (yoloseg_relational.py) now decodes its own box
                 # branch (center + size -> corners) before returning, so
