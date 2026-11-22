@@ -125,26 +125,42 @@ class YOLODetectionLoss(nn.Module):
             pred_boxes_raw = head_flat[..., :4]
             pred_cls_logits = head_flat[..., 4:]
 
-            # --- 1. COMPUTE CLASSIFICATION LOSS (BCE.loss) ---
-            # Broaden target labels to match the spatial dimensions of the grid cells
-            target_cls = gt_labels.unsqueeze(1).repeat(
-                1, head_flat.shape[1], self.num_classes
-            )
-            loss_cls = self.bce_cls(pred_cls_logits, target_cls)
-            total_cls_loss += loss_cls
-
-            # --- 2. COMPUTE BOUNDING BOX DISTANCE LOSS (Bbox.loss) ---
+            hg, wg = head_tensor.shape[2], head_tensor.shape[3]
             # We track grid elements belonging to images containing positive tumor labels
             pos_batch_indices = torch.where(gt_labels == 1.0)[0]
 
+            # Responsible cells: a tumour image's own cells (centre inside the box,
+            # or the centre cell). Everything else, including every cell of a
+            # background image, is a negative. Each grid cell is the unit of
+            # classification, so the target must say which cells are the tumour.
+            resp_full = torch.zeros(
+                B, head_flat.shape[1], dtype=torch.bool, device=device
+            )
+            if len(pos_batch_indices) > 0:
+                resp_full[pos_batch_indices] = self._positive_cell_mask(
+                    gt_boxes[pos_batch_indices], hg, wg
+                )
+
+            # --- 1. COMPUTE CLASSIFICATION LOSS (BCE.loss) ---
+            # Responsible cells are rare, so the positive class is weighted by the
+            # negative/positive ratio (capped), otherwise the head predicts "no tumour"
+            # everywhere. The paper does not specify this weighting.
+            target_cls = resp_full.float().unsqueeze(-1)
+            n_pos = resp_full.sum().clamp(min=1).float()
+            n_neg = resp_full.numel() - n_pos
+            pos_weight = (n_neg / n_pos).clamp(max=100.0)
+            loss_cls = nn.functional.binary_cross_entropy_with_logits(
+                pred_cls_logits, target_cls, pos_weight=pos_weight
+            )
+            total_cls_loss += loss_cls
+
+            # --- 2. COMPUTE BOUNDING BOX DISTANCE LOSS (Bbox.loss) ---
             if len(pos_batch_indices) > 0:
                 # Only the cells responsible for each tumour box regress it.
                 # Training every cell toward the same whole-image box made the
                 # head predict a blurred average, which kept the loss near 1.0.
                 pos_gt = gt_boxes[pos_batch_indices]
-                resp = self._positive_cell_mask(
-                    pos_gt, head_tensor.shape[2], head_tensor.shape[3]
-                )  # (P, Hg*Wg)
+                resp = resp_full[pos_batch_indices]  # (P, Hg*Wg)
                 pos_pred_boxes = pred_boxes_raw[pos_batch_indices][resp]
                 pos_gt_boxes = pos_gt.unsqueeze(1).expand(-1, resp.shape[1], -1)[resp]
 
