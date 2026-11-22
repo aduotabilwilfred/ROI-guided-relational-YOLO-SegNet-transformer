@@ -55,7 +55,7 @@ stages:
 
 
   train_yoloseg:
-    cmd: python src/models/train_yoloseg.py --folds-root outputs/ultralytics_folds --output runs/yoloseg_relational --epochs 50 --batch-size 16 --lr 3e-5 --pos-weight 55 --image-size 512
+    cmd: python src/models/train_yoloseg.py --folds-root outputs/ultralytics_folds --output runs/yoloseg_relational --epochs 50 --batch-size 16 --lr 1e-4 --pos-weight 55 --image-size 512
     deps:
       - outputs/ultralytics_folds
       - src/models/train_yoloseg.py

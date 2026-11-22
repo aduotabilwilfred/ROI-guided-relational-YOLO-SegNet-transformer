@@ -202,6 +202,8 @@ def train_one_fold(
     pos_weight: float = 1.0,
 ) -> YOLOSegNet:
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    # Cosine annealing from lr down to 0 over the run (paper: cosine schedule).
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     loader = DataLoader(
         FoldDataset(fold_dir, "train", model.image_size),
         batch_size=batch_size,
@@ -255,12 +257,16 @@ def train_one_fold(
         acc_mask = correct_mask / total if total > 0 else 0.0
         print(
             f" fold {fold_dir.name} | epoch {epoch + 1}/{epochs} | "
+            f"lr {opt.param_groups[0]['lr']:.2e} | "
             f"loss {running_total / n:.4f} | seg {running_seg / n:.4f} | "
             f"bbox {running_bbox / n:.4f} | cls {running_cls / n:.4f} | "
             f"imgcls {running_imgcls / n:.4f} | acc {acc:.4f} | "
             f"acc_mask {acc_mask:.4f}"
         )
+        current_lr = opt.param_groups[0]["lr"]
+        sched.step()
         if mlrun is not None:
+            mlrun.log_metric(f"fold_{fold_idx}_lr", current_lr, step=epoch)
             mlrun.log_metric(
                 f"fold_{fold_idx}_train_loss", running_total / n, step=epoch
             )
@@ -320,7 +326,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-folds", type=int, default=5)
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=16)
-    p.add_argument("--lr", type=float, default=3e-5)
+    p.add_argument(
+        "--lr",
+        type=float,
+        default=1e-4,
+        help="peak learning rate; cosine-annealed to 0 over --epochs",
+    )
     p.add_argument(
         "--pos-weight",
         type=float,
