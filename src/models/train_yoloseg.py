@@ -364,6 +364,59 @@ def evaluate_boxes(
     return torch.cat(ious)
 
 
+@torch.no_grad()
+def evaluate_scales(
+    fold_dir: Path, model: YOLOSegNet, device: str, batch_size: int, role: str = "test"
+) -> dict[str, tuple[float, float, int]]:
+    """Box quality per detection scale, over the responsible cells only.
+
+    Returns {scale: (box loss, mean IoU, responsible cell count)}. The loss is
+    the same 1 - CIoU the training box loss uses, so the three scale losses
+    average to the logged box loss. Scales are named by stride.
+    """
+    model.eval()
+    loss_fn = YOLODetectionLoss(num_classes=1)
+    loader = DataLoader(
+        FoldDataset(fold_dir, role, model.image_size),
+        batch_size=batch_size,
+        collate_fn=collate,
+        shuffle=False,
+    )
+    names = ("stride_8", "stride_16", "stride_32")
+    loss_sum = dict.fromkeys(names, 0.0)
+    iou_sum = dict.fromkeys(names, 0.0)
+    count = dict.fromkeys(names, 0)
+    for batch in loader:
+        images = batch["image"].to(device)
+        gt_label = batch["gt_label"].to(device)[:, 0] > 0.5
+        gt_box = batch["gt_box"].to(device)
+        if not gt_label.any():
+            continue
+        pos_gt = gt_box[gt_label]
+        _, out_high, out_mid, out_low, _ = model(images)
+        for name, head in zip(names, (out_high, out_mid, out_low)):
+            hg, wg = head.shape[2], head.shape[3]
+            flat = head.flatten(2).transpose(1, 2)[gt_label]  # (P, cells, 5)
+            boxes = flat[..., :4]
+            resp = loss_fn._positive_cell_mask(pos_gt, hg, wg)  # (P, cells)
+            if not resp.any():
+                continue
+            gt_rep = pos_gt.unsqueeze(1).expand(-1, boxes.shape[1], -1)
+            pred_sel, gt_sel = boxes[resp], gt_rep[resp]
+            n = int(resp.sum())
+            loss_sum[name] += float(loss_fn._get_iou_loss(pred_sel, gt_sel)) * n
+            iou_sum[name] += float(_elementwise_iou(pred_sel, gt_sel).sum())
+            count[name] += n
+    return {
+        name: (
+            loss_sum[name] / count[name] if count[name] else 0.0,
+            iou_sum[name] / count[name] if count[name] else 0.0,
+            count[name],
+        )
+        for name in names
+    }
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Train the joint Relational YOLO-SegNet (Track B)."
@@ -557,6 +610,20 @@ def main() -> int:
         mlrun.log_metric(
             f"fold_{fold}_test_box_iou_at_0.5", fold_box_hit, step=args.epochs
         )
+
+        scale_stats = evaluate_scales(fold_dir, model, args.device, args.batch_size)
+        per_fold[fold]["scales"] = {k: list(v) for k, v in scale_stats.items()}
+        for name, (s_loss, s_iou, s_n) in scale_stats.items():
+            print(
+                f" fold {fold} {name} box loss {s_loss:.4f} | mean IoU {s_iou:.4f} "
+                f"| responsible cells {s_n}"
+            )
+            mlrun.log_metric(
+                f"fold_{fold}_test_{name}_box_loss", s_loss, step=args.epochs
+            )
+            mlrun.log_metric(
+                f"fold_{fold}_test_{name}_box_iou", s_iou, step=args.epochs
+            )
 
         total_inter += inter
         total_pred += pred
